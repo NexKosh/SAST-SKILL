@@ -29,6 +29,7 @@ Explore the codebase and identify:
   - **Koa**: `new Koa()`, `app.use()`, `koa-router` (`router.get/post/put/del`), `ctx.request.body`, `ctx.query`, `ctx.params`
   - **Hapi**: `Hapi.server()`, `server.route({method, path, handler})`, `options.auth` field per route, server lifecycle extensions
   - **Restify**: `restify.createServer()`, `server.get/post/put/del/patch`, `server.use()` middleware
+  - **Next.js App Router**: presence of `app/` or `src/app/` directory with `page.tsx`/`page.js` and/or `route.ts`/`route.js` files; `next.config.js` / `next.config.ts`; `middleware.ts` / `middleware.js` at the project root or inside `src/`
 - **Node.js config patterns**: `dotenv` (`.env` files, `process.env.*`), `config` npm package (`config/default.json`, `config/production.json`), `convict`, `nconf`
 - **Package managers & dependencies**: Lock files, dependency manifests (package.json, requirements.txt, go.mod, Gemfile, pom.xml, etc.)
 - **Infrastructure hints**: Dockerfiles, docker-compose, Kubernetes manifests, Terraform, CI/CD configs
@@ -79,6 +80,42 @@ If the project uses any Node.js framework, perform these additional reconnaissan
 - Search for `server.route({` — extract `method`, `path`, `handler`, and `options.auth`.
 - A route with `options.auth: false` is explicitly unauthenticated even if a default auth scheme is configured.
 
+**Next.js App Router discovery (perform when `app/` or `src/app/` directory is present):**
+
+Next.js App Router uses the file system as its router. Its structure is fundamentally different from Express-style routing and requires dedicated analysis.
+
+> ⚠️ **Critical concept — Route Groups**: Folders named with parentheses like `(auth)`, `(dashboard)`, `(public)` are "Route Groups". They organize routes but their names **do NOT appear in the URL**. For example, `app/(dashboard)/settings/page.tsx` is served at `/settings`, NOT `/dashboard/settings`. This is a common source of middleware bypass vulnerabilities.
+
+1. **Map the `app/` directory tree**:
+   - List every subdirectory. Identify which are Route Groups (names in parentheses) vs regular path segments.
+   - For each `page.tsx` / `page.js`: compute the effective URL by stripping the `app/` prefix and removing any `(groupName)` segments. Dynamic segments stay: `[id]` → `:id`, `[...slug]` → `*slug`.
+   - For each `route.ts` / `route.js`: same URL computation. Also read the file to identify which HTTP methods are exported (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`). Each exported method is a separate entry point.
+
+2. **Analyze `middleware.ts` / `middleware.js`** (at project root or inside `src/`):
+   - Read and record the full `matcher` config from `export const config = { matcher: [...] }`. If no matcher is present, the middleware runs on **all** routes.
+   - Read the middleware function body. Determine what it actually does:
+     - Does it verify a session, JWT, or cookie and redirect on failure? → **auth enforcement**
+     - Does it only set headers, log, or call `NextResponse.next()` unconditionally? → **no auth enforcement** (provides no protection even if matcher covers the route)
+   - For each enumerated route (pages + API handlers), evaluate whether its effective URL matches the matcher:
+     - **Covered**: at least one matcher pattern positively matches the URL.
+     - **NOT covered**: no pattern matches, or the route is excluded by a negative lookahead.
+   - Note: matcher patterns use path-to-regexp syntax, not glob syntax. A pattern like `/dashboard/:path*` does NOT cover `/settings` even if `/settings` is inside a `(dashboard)` route group.
+
+3. **Analyze `layout.tsx` / `layout.js` for server-side auth guards**:
+   - For each Route Group folder, read its `layout.tsx`. Check if it performs server-side auth:
+     - Calls `getServerSession()`, `auth()`, `getSession()`, `cookies()` to read a session/token
+     - Calls `redirect(...)` if no valid session exists
+   - A layout that performs these checks acts as a **server-side auth gate** for all pages under that group.
+   - A layout with NO auth check makes every page under that group rely entirely on middleware for protection.
+   - API route handlers (`route.ts`) are NOT affected by layouts — they have no layout layer.
+
+4. **Cross-reference middleware coverage with layout auth** for each route:
+   - ✅ Middleware covers it AND layout has auth → double-protected
+   - ⚠️ Middleware covers it BUT layout has no auth → middleware-only (check middleware actually enforces auth)
+   - ⚠️ Middleware does NOT cover it BUT layout has auth → layout-only (server component check)
+   - 🔴 Middleware does NOT cover it AND layout has no auth → **potentially unprotected**
+   - 🔴 `route.ts` API handler: not covered by middleware AND no in-handler auth check → **unprotected API endpoint**
+
 **Write the results of Phase 1 and Phase 2 to `sast/architecture.md`.** Use this format:
 
 ```markdown
@@ -113,6 +150,37 @@ Cover the primary flows (e.g., registration, login, core business actions).]
 | ... | | | | | | |
 
 > **Middleware Chain column**: List each middleware function applied to this route in execution order, left to right. For project-defined middleware, read the source and summarize what it enforces (e.g., `verifyJWT` → authentication check, `requireRole('admin')` → role guard). If no middleware applies, write `none`.
+
+## [Next.js only] Route Group Map
+
+> Include this section only if the project uses Next.js App Router.
+>
+> ⚠️ Route Group folder names in parentheses do NOT appear in URLs. List them explicitly so downstream skills understand the mapping.
+
+### Route Groups
+
+| Route Group Folder | Effective URL Prefix | Layout auth guard? | Auth method |
+|---|---|---|---|
+| `app/(dashboard)` | `/` (no prefix — routes appear at top level) | Yes | `getServerSession()` + `redirect('/login')` |
+| `app/(auth)` | `/` (login, register, etc.) | No | — |
+| `app/(public)` | `/` (marketing pages) | No | — |
+| `app/api` | `/api` | No layout | — |
+
+### middleware.ts Analysis
+
+- **File**: `middleware.ts` / `src/middleware.ts` / not found
+- **Matcher patterns**: [exact strings, e.g. `['/((?!login|register|_next/static|_next/image|favicon\.ico).*)']`]
+- **Middleware actually enforces**: [auth redirect / session check / headers only / analytics / none]
+- **Routes NOT covered by matcher**:
+  - [list each route or route group whose effective URL is not matched]
+
+### Route Coverage Summary
+
+| Route | Route Group | Effective URL | Middleware covers? | Layout auth? | Overall posture |
+|---|---|---|---|---|---|
+| `app/(dashboard)/settings/page.tsx` | `(dashboard)` | `/settings` | 🔴 NO | ✅ Yes | ⚠️ Partial |
+| `app/api/user/route.ts` | none | `/api/user` | ✅ Yes | N/A | ✅ Protected |
+| `app/(public)/about/page.tsx` | `(public)` | `/about` | 🔴 NO | 🔴 No | ✅ Intentionally public |
 
 ## Trust Boundaries
 

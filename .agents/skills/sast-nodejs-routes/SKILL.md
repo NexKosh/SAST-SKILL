@@ -38,6 +38,7 @@ Enumerate routes from all of the following (use whatever is present in the proje
 - **Koa**: `router.get/post/put/del/patch(path, handler)` via `koa-router`
 - **Hapi**: `server.route({ method, path, handler })` — extract all three fields
 - **Restify**: `server.get/post/put/del/patch(path, handler)`
+- **Next.js App Router**: file-system routes under `app/` — `page.tsx`, `route.ts`, and route groups in `(parenthesized)` folders
 
 ### What counts as a "project-defined function"
 
@@ -116,10 +117,56 @@ Launch a subagent with the following instructions:
 > **Restify**:
 > - Search for `server.get(`, `server.post(`, `server.put(`, `server.del(`
 >
+> **Next.js App Router**:
+>
+> Next.js uses the file system itself as the router. Routes are defined by directory structure under `app/` (or `src/app/`). **Important**: folders named with parentheses — e.g., `(auth)`, `(dashboard)`, `(public)` — are "Route Groups" that do NOT appear in the URL path but DO determine which `layout.tsx` and which middleware `matcher` rules apply.
+>
+> Apply this enumeration process:
+>
+> 1. **Locate the app directory**: Look for `app/` or `src/app/` at the project root.
+>
+> 2. **Enumerate all `page.tsx` / `page.js` files** (UI routes):
+>    - Walk every subdirectory under `app/`.
+>    - Strip the `app/` prefix to compute the URL path.
+>    - Strip any `(groupName)` path segments from the URL — they do not appear in the URL. For example, `app/(dashboard)/profile/page.tsx` → URL `/profile`.
+>    - Strip dynamic segments for display: `[id]` → `:id`, `[...slug]` → `*slug`, `[[...slug]]` → `*slug?`.
+>    - Record which Route Group folder (if any) it belongs to.
+>
+> 3. **Enumerate all `route.ts` / `route.js` files** (API Route Handlers):
+>    - Same path computation as above.
+>    - Read the file and identify which HTTP method exports exist: `export function GET`, `export function POST`, `export function PUT`, `export function DELETE`, `export function PATCH`.
+>    - Record each exported method as a separate route entry.
+>    - Note any `export const runtime = 'edge'` or `export const dynamic` directives.
+>
+> 4. **Analyze `middleware.ts` / `middleware.js`** (project root or `src/`):
+>    - Read the file and extract the `matcher` config from `export const config = { matcher: [...] }`.
+>    - The matcher is an array of path patterns (can be glob strings or regex-like patterns with negative lookaheads).
+>    - For each enumerated route (pages + API routes), **determine if its URL path would be matched** by the middleware matcher:
+>      - A route is **covered** if at least one matcher pattern positively matches its URL.
+>      - A route is **NOT covered** if no pattern matches, or if the only matching patterns are negative lookaheads that exclude it.
+>      - Common exclusion patterns: `'/((?!api|_next/static|_next/image|favicon.ico).*)' ` excludes `/api/*`, `/_next/*`, and `/favicon.ico` — everything else is matched. Verify carefully.
+>    - Also note what the middleware function actually does: does it verify a session/token/cookie? Does it redirect unauthenticated users? Or does it only run analytics/logging?
+>
+> 5. **Analyze `layout.tsx` / `layout.js` for auth guards**:
+>    - For each Route Group folder, check if the `layout.tsx` in that folder (or a parent folder) performs authentication:
+>      - Does it call a `getSession()`, `auth()`, `getServerSession()`, `cookies()` for a session token, or similar server-side auth check?
+>      - Does it redirect (`redirect(...)`) unauthenticated users?
+>      - A layout that does NOT perform any auth check makes ALL routes under that Route Group potentially unprotected — even if the middleware matcher covers them, the layout provides a second layer (or single layer if middleware is absent).
+>    - Record the auth posture of each Route Group based on its layout.
+>
+> 6. **Cross-reference: middleware coverage vs layout auth**:
+>    - For each route, record:
+>      - ✅ Middleware covers it AND layout has auth check → double-protected
+>      - ⚠️ Middleware covers it BUT layout has NO auth check → middleware-only (verify middleware actually enforces auth)
+>      - ⚠️ Middleware does NOT cover it BUT layout has auth check → layout-only (server component auth)
+>      - 🔴 Middleware does NOT cover it AND layout has NO auth check → potentially unprotected
+>    - API route handlers (`route.ts`) do NOT have layouts, so they rely entirely on middleware OR in-handler auth checks.
+>
 > **For each route, also record**:
 > - Whether an auth middleware or guard is listed in the route definition (e.g., `router.get('/path', authMiddleware, handler)` — note `authMiddleware`)
 > - The file and approximate line number of the route registration
 > - The file and approximate line number of the handler function definition (if it can be located)
+> - **For Next.js**: the Route Group it belongs to, whether middleware covers it, and whether the layout performs auth
 >
 > **Output format** — write to `sast/nodejs-routes-recon.md`:
 >
@@ -130,6 +177,20 @@ Launch a subagent with the following instructions:
 > Total routes found: [N]
 > Frameworks detected: [list]
 >
+> ## [Next.js only] Middleware Analysis
+> - Middleware file: `middleware.ts` / not found
+> - Matcher patterns: [list the exact matcher strings]
+> - Middleware function purpose: [auth enforcement / analytics / redirect / other]
+> - Routes NOT covered by middleware: [count and list]
+>
+> ## [Next.js only] Route Group Auth Posture
+>
+> | Route Group | Layout file | Layout performs auth? | Auth method |
+> |---|---|---|---|
+> | `(auth)` | `app/(auth)/layout.tsx` | No | — |
+> | `(dashboard)` | `app/(dashboard)/layout.tsx` | Yes | `getServerSession()` + redirect |
+> | [root] | `app/layout.tsx` | No | — |
+>
 > ## Routes
 >
 > ### 1. [METHOD] [full-path]
@@ -137,6 +198,10 @@ Launch a subagent with the following instructions:
 > - **Handler**: `functionName()` in `path/to/handler.ts` (line Y)
 > - **Auth middleware**: [list middleware names, or "none detected"]
 > - **Guard / decorator**: [e.g., `@UseGuards(JwtAuthGuard)`, or "none"]
+> - **[Next.js] Route Group**: `(groupName)` or [root]
+> - **[Next.js] Middleware coverage**: ✅ covered / 🔴 NOT covered
+> - **[Next.js] Layout auth**: ✅ layout enforces auth / ⚠️ layout has no auth check / N/A
+> - **[Next.js] Overall posture**: ✅ protected / ⚠️ partial / 🔴 unprotected
 > - **Handler snippet**:
 >   ```
 >   [the first 5-10 lines of the handler function body]

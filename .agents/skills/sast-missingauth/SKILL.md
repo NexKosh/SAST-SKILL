@@ -64,6 +64,28 @@ Authorization logic is present but can be bypassed:
 - Role check is conditional on a request header or parameter the attacker controls
 - Middleware is registered but the route is mounted before the middleware applies
 
+### Class 4: Next.js Route Group Middleware Gap
+Applies to Next.js App Router projects. A route inside a parenthesized route group folder (e.g., `app/(dashboard)/settings/page.tsx`) resolves to a URL that strips the group name (e.g., `/settings`). If the `middleware.ts` matcher does not include that URL pattern, the route bypasses middleware entirely — even when the developer intended the group to be protected.
+
+Common ways this manifests:
+- Matcher only covers `/dashboard/*` but the route group `(dashboard)` resolves routes to `/settings`, `/profile`, `/billing` — NOT under `/dashboard/`
+- Matcher uses a positive allowlist that omits some route group paths
+- New route groups are added without updating the `middleware.ts` matcher
+- API route handlers (`route.ts`) inside ungrouped or mismatched directories bypass middleware
+
+```
+# Example: developer expects /settings to be protected because it's in (dashboard)
+# But middleware.ts only matches /dashboard/*
+
+app/
+  (dashboard)/
+    settings/page.tsx   → URL: /settings   ← NOT matched by /dashboard/*
+    profile/page.tsx    → URL: /profile    ← NOT matched by /dashboard/*
+
+middleware.ts:
+  matcher: ['/dashboard/:path*']   ← misses all (dashboard) group routes!
+```
+
 ---
 
 ## Authorization Patterns That PREVENT Vulnerabilities
@@ -116,6 +138,20 @@ r.Group(func(r chi.Router) {
 Gate::define('admin-action', fn($user) => $user->role === 'admin');
 // In controller
 $this->authorize('admin-action');
+```
+
+**6. Next.js App Router — double-layer protection**
+```typescript
+// middleware.ts — matcher covers all non-public routes
+export const config = { matcher: ['/((?!login|register|_next/static|_next/image|favicon\.ico).*)'] }
+export default withAuth(middleware, { pages: { signIn: '/login' } })
+
+// app/(dashboard)/layout.tsx — server-side auth guard as second layer
+export default async function DashboardLayout({ children }) {
+  const session = await getServerSession(authOptions)
+  if (!session) redirect('/login')
+  return <>{children}</>
+}
 ```
 
 ---
@@ -360,6 +396,12 @@ Launch a subagent with the following instructions:
 >    - Identify the pattern used: `@login_required`, `auth` middleware, `[Authorize]`, `authenticate_user!`, JWT verification middleware, session checks
 >    - Note which routes or route groups they are applied to
 >    - Note any routes explicitly excluded from auth (e.g., `except: [:index, :show]`)
+>    - **For Next.js**: read `middleware.ts` / `middleware.js` (project root or `src/`) in full:
+>      - Extract the `matcher` from `export const config = { matcher: [...] }`
+>      - Determine what the middleware function actually enforces (auth check / redirect / analytics only)
+>      - For each page route and API route handler, evaluate whether its URL matches the matcher patterns
+>      - Route Group folders `(groupName)` do NOT appear in the URL — compute effective URLs first, then check matcher coverage
+>      - An API route handler (`route.ts`) has no layout, so if middleware doesn't cover it, it has no automatic auth
 >
 > 3. **Role/permission system** — identify how roles are defined and checked:
 >    - Role constants/enums: `ROLE_ADMIN`, `'admin'`, `UserRole.ADMIN`, `is_staff`, `is_superuser`
@@ -381,6 +423,13 @@ Launch a subagent with the following instructions:
 >    - Whether a role/permission check is present
 >    - The HTTP method(s) it handles
 >    - Whether it reads, writes, or deletes data
+>    - **For Next.js**: the Route Group it belongs to, effective URL (after stripping group names), middleware coverage status, and layout auth status
+>
+> 6. **For Next.js projects — Route Group Middleware Gap Analysis**:
+>    - List all Route Group folders found under `app/`
+>    - For each group: what is the middleware matcher, and does the matcher cover the effective URLs of routes in this group?
+>    - Flag any group where: middleware does NOT cover its routes AND the layout.tsx does NOT perform an auth check
+>    - Flag any `route.ts` API handlers that are neither covered by middleware NOR have in-handler auth checks
 >
 > **What to ignore**:
 > - Publicly intended endpoints: login, register, password reset request, public content (blog posts, product listings)
@@ -396,6 +445,17 @@ Launch a subagent with the following instructions:
 > - Auth mechanism: [JWT / session / API key / OAuth]
 > - Auth decorators/middleware: [list names, e.g. @login_required, auth, requireAdmin]
 >
+> ## [Next.js only] Middleware Matcher Analysis
+> - Middleware file: [path or "not found"]
+> - Matcher patterns: [exact strings from config.matcher]
+> - Middleware enforces: [auth redirect / session check / none / analytics only]
+>
+> | Route Group | Example URL | Matcher covers? | Layout auth? | Posture |
+> |---|---|---|---|---|
+> | `(dashboard)` | `/profile` | 🔴 NO | ✅ Yes | ⚠️ Partial |
+> | `(admin)` | `/admin/users` | ✅ Yes | ✅ Yes | ✅ Protected |
+> | [root] | `/api/data` | 🔴 NO | N/A | 🔴 Unprotected |
+>
 > ## Endpoint Inventory
 >
 > ### 1. [Endpoint name / description]
@@ -404,6 +464,9 @@ Launch a subagent with the following instructions:
 > - **Operation**: [read / write / delete / admin-action]
 > - **Auth present**: [yes / no]
 > - **Role check present**: [yes / no / partial]
+> - **[Next.js] Route Group**: `(groupName)` or [root] or N/A
+> - **[Next.js] Middleware coverage**: ✅ covered / 🔴 NOT covered / N/A
+> - **[Next.js] Layout auth**: ✅ yes / ⚠️ no / N/A
 > - **Code snippet**:
 >   ```
 >   [route registration + handler signature]
@@ -461,6 +524,11 @@ Give each batch subagent the following instructions (substitute the batch-specif
 >    - Is there an auth middleware, decorator, or guard on this route or its parent group?
 >    - Trace the middleware chain — confirm the auth middleware runs BEFORE the handler, not after
 >    - Check if the route is accidentally mounted outside an auth-protected group
+>    - **For Next.js**: check BOTH layers:
+>      - **Layer 1 — middleware.ts**: does the matcher cover this route's effective URL? Read `middleware.ts` and evaluate whether the function actually enforces auth (not just sets headers or logs).
+>      - **Layer 2 — layout.tsx**: does the nearest `layout.tsx` (in the same Route Group folder or a parent) perform `getServerSession()` / `auth()` / `cookies()` and redirect on failure?
+>      - **API route handlers (`route.ts`)**: no layout applies — check middleware coverage AND in-handler auth checks (e.g., `const session = await getServerSession(); if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })`)
+>      - A route is unprotected if BOTH layers are absent. A route is partially protected if only one layer is present.
 >
 > **Deep Internal Call Tracing — follow ALL project-defined middleware and guard functions**
 >
@@ -590,4 +658,7 @@ After **all** Phase 2 batch subagents complete, read every `sast/missingauth-bat
 - A missing auth or role check on one HTTP method (e.g., DELETE) is a full vulnerability even if GET is protected.
 - When in doubt, classify as "Needs Manual Review" rather than "Not Vulnerable". False negatives are worse than false positives in security assessment.
 - Pay attention to route grouping: a `use('/admin', adminRouter)` pattern protects all routes in `adminRouter`, but routes mounted outside that group are not protected.
+- **For Next.js App Router**: Route Group folder names in parentheses `(like-this)` do NOT appear in the URL. Always compute effective URLs before checking middleware matcher coverage. A developer may name a group `(protected)` and assume it's protected, but the matcher only cares about the URL pattern, not the folder name.
+- **For Next.js App Router**: Always check both protection layers — middleware.ts AND layout.tsx. An unprotected API route handler (`route.ts`) is especially dangerous because it has no layout layer.
+- **For Next.js App Router**: The middleware function must actually enforce auth (check session, verify token, redirect on failure). A middleware that only sets headers or calls `next()` unconditionally provides no protection even if the matcher covers the route.
 - Clean up intermediate files: delete `sast/missingauth-recon.md` and all `sast/missingauth-batch-*.md` files after the final `sast/missingauth-results.md` is written.

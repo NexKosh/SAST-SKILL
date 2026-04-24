@@ -1,10 +1,10 @@
----
+﻿---
 name: sast-missingauth
 description: >-
   Detect missing authentication and broken function-level authorization
   vulnerabilities in a codebase using a three-phase approach: recon (map
   endpoints and the role/permission system), batched verify (check auth/authz
-  in parallel subagents, 3 endpoints each), and merge (consolidate batch
+  sequentially in batches of 3 endpoints each), and merge (consolidate batch
   results). Covers unauthenticated access and vertical privilege escalation
   (e.g., regular user accessing admin-only functions). Requires
   sast/architecture.md (run sast-analysis first). Outputs findings to
@@ -14,7 +14,7 @@ description: >-
 
 # Missing Authentication & Broken Function-Level Authorization Detection
 
-You are performing a focused security assessment to find missing authentication and broken function-level authorization vulnerabilities in a codebase. This skill uses a three-phase approach with subagents: **recon** (map endpoints and the permission system), **batched verify** (check authentication and authorization in parallel batches of 3 endpoints each), and **merge** (consolidate batch results into the final report).
+You are performing a focused security assessment to find missing authentication and broken function-level authorization vulnerabilities in a codebase. This skill uses a three-phase approach: **recon** (map endpoints and the permission system), **batched verify** (check authentication and authorization in parallel batches of 3 endpoints each), and **merge** (consolidate batch results into the final report).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -369,11 +369,11 @@ public async Task<IActionResult> DeleteUser(int id) {
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Recon — Map Endpoints and Permission System
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Build a complete map of (1) all application endpoints/routes and their current authentication/authorization posture, and (2) the role/permission system. Write results to `sast/missingauth-recon.md`.
 >
@@ -481,20 +481,30 @@ Launch a subagent with the following instructions:
 
 ### Phase 2: Verify — Check Authentication and Authorization (Batched)
 
-After Phase 1 completes, read `sast/missingauth-recon.md` and split the endpoint inventory into **batches of up to 3 endpoints each** (each numbered `### N.` under **Endpoint Inventory**). Launch **one subagent per batch in parallel**. Each subagent verifies only its assigned endpoints and writes results to its own batch file.
+After Phase 1 completes, read `sast/missingauth-recon.md` and split the endpoint inventory into **batches of up to 3 endpoints each** (each numbered `### N.` under **Endpoint Inventory**). Process each batch **sequentially**. For each batch, verify only the assigned endpoints and write results to the batch file.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/missingauth-recon.md` and count the numbered endpoint sections under **Endpoint Inventory** (`### 1.`, `### 2.`, etc.).
 2. Divide them into batches of up to 3. For example, 8 endpoints → 3 batches (1–3, 4–6, 7–8).
 3. For each batch, extract the full text of those endpoint sections from the recon file.
-4. Launch all batch subagents **in parallel**, passing each one only its assigned endpoints.
-5. Each subagent writes to `sast/missingauth-batch-N.md` where N is the 1-based batch number.
-6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project uses Python/Django, include only the "Python — Django" (and if relevant, Flask) examples. Include these selected examples in each subagent's instructions where indicated by `[TECH-STACK EXAMPLES]` below.
+4. Process each batch sequentially, working through each one only its assigned endpoints.
+5. Write results to `sast/missingauth-batch-N.md` where N is the 1-based batch number.
+6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project uses Python/Django, include only the "Python — Django" (and if relevant, Flask) examples. Include these selected examples for the current batch where indicated by `[TECH-STACK EXAMPLES]` below.
 
-Give each batch subagent the following instructions (substitute the batch-specific values):
+For each batch, apply the following analysis directly (substitute the batch-specific values):
 
 > **Goal**: Verify the following endpoints for missing authentication and broken function-level authorization vulnerabilities. Write results to `sast/missingauth-batch-[N].md`.
+>
+> **Step 0 — Cross-reference with route call graph (Node.js / Next.js projects)**:
+> If `sast/nodejs-routes.md` exists, do the following BEFORE analyzing each endpoint:
+> 1. Find each assigned endpoint's entry in the call graph.
+> 2. Check the "Auth" field — it shows inline middleware AND group-level middleware. "none detected" means no auth was found at the route registration level.
+> 3. Check "Overall posture": 🔴 unprotected = no middleware AND no layout auth → highest priority. ⚠️ partial = only one layer → verify it actually enforces auth.
+> 4. For Next.js route groups: the folder name `(groupName)` does NOT appear in the URL. `app/(dashboard)/settings/page.tsx` is served at `/settings`, NOT `/dashboard/settings`. A `middleware.ts` matcher covering `/dashboard/*` does NOT protect `/settings`. Verify the matcher patterns against the actual effective URLs from the call graph.
+> 5. For Server Actions (`'use server'` functions): check whether the action verifies the caller's session BEFORE any state mutation. An action with no auth check is a direct unauthenticated mutation endpoint.
+>
+> **Next.js**: API route handlers (`route.ts`) have no layout layer — they rely entirely on middleware OR in-handler auth. If the middleware matcher does not cover the route's effective URL AND there is no in-handler auth check, it is unprotected.
 >
 > **Your assigned endpoints** (from the recon phase):
 >
@@ -621,7 +631,7 @@ Give each batch subagent the following instructions (substitute the batch-specif
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/missingauth-batch-*.md` file and merge them into a single `sast/missingauth-results.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/missingauth-batch-*.md` file and merge them into a single `sast/missingauth-results.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -653,12 +663,12 @@ After **all** Phase 2 batch subagents complete, read every `sast/missingauth-bat
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes — it depends on the recon output.
 - Phase 3 must run AFTER all Phase 2 batches complete — it depends on all batch outputs.
-- Batch size is **3 endpoints per subagent**. If there are 1–3 endpoints total, use a single subagent. If there are 10, use 4 subagents (3+3+3+1).
-- Launch all batch subagents **in parallel** — do not run them sequentially.
-- Each batch subagent receives only its assigned endpoints' text from the recon file, not the entire recon file. This keeps each subagent's context small and focused.
+- Process batches of up to **3 endpoints each** sequentially. If there are 1-3 endpoints total, treat it as a single batch.
+- Process all batches sequentially — write results to batch files as you complete each one.
+- For each batch, work only from the assigned endpoints' text from the recon file, not the entire file. This keeps each batch focused.
 - Focus on **vertical privilege escalation** (user → admin) and **unauthenticated access**. Horizontal escalation (user A → user B's resource) is covered by the IDOR skill.
 - Authentication (you are who you say you are) and authorization (you are allowed to do this) are separate concerns — check both.
 - Middleware order matters: a middleware registered after the route handler will NOT protect the route.

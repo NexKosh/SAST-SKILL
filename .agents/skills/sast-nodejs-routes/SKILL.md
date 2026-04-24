@@ -1,11 +1,11 @@
----
+﻿---
 name: sast-nodejs-routes
 description: >-
   Enumerate every API route in a Node.js codebase and perform unlimited-depth
   function call tracing from each route handler through all project-defined code.
   Produces a complete route-to-callgraph map with security-sensitive operations
   flagged at every layer. Uses a three-phase approach: recon (enumerate all
-  routes and their handlers), batched trace (3 routes per subagent, recursive
+  routes and their handlers), batched trace (3 routes per batch, recursive
   call tracing with no layer limit), and merge (consolidate into
   sast/nodejs-routes.md). Requires sast/architecture.md (run sast-analysis
   first). Use when asked to do a thorough Node.js security review, map all API
@@ -74,13 +74,13 @@ At every node in the call tree, flag any of the following. These are NOT automat
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ---
 
 ### Phase 1: Route Enumeration
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Enumerate every HTTP route defined anywhere in this Node.js codebase. For each route, record the method, path, handler function name, and source location. Write results to `sast/nodejs-routes-recon.md`.
 >
@@ -230,17 +230,17 @@ Only proceed to Phase 2 if at least one route was found.
 
 ### Phase 2: Deep Call Tracing (Batched)
 
-After Phase 1 completes, read `sast/nodejs-routes-recon.md` and split the routes into **batches of up to 3 routes each**. Launch **one subagent per batch in parallel**.
+After Phase 1 completes, read `sast/nodejs-routes-recon.md` and split the routes into **batches of up to 3 routes each**. Process each batch **sequentially**.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/nodejs-routes-recon.md` and count the numbered route sections (`### 1.`, `### 2.`, ...).
 2. Divide into batches of up to 3.
 3. For each batch, extract the full text of those route sections from the recon file.
-4. Launch all batch subagents **in parallel**, passing each its assigned routes.
-5. Each subagent writes to `sast/nodejs-routes-batch-N.md`.
+4. Process each batch sequentially, working through each its assigned routes.
+5. Write results to `sast/nodejs-routes-batch-N.md`.
 
-Give each batch subagent the following instructions (substitute batch-specific values):
+For each batch, apply the following analysis (substitute batch-specific values):
 
 > **Goal**: For each assigned route, build a complete call tree by recursively tracing every project-defined function called from the handler. Flag security-sensitive operations at each node. Write results to `sast/nodejs-routes-batch-[N].md`.
 >
@@ -356,7 +356,7 @@ Give each batch subagent the following instructions (substitute batch-specific v
 > [Repeat for each assigned route]
 > ```
 >
-> **Important notes for the subagent**:
+> **Important notes**:
 > - You must actually READ each referenced file to trace the call chain — do not guess at function bodies.
 > - When an import resolves to a file you've already read for a previous route in this batch, you may reuse your memory of it — you don't need to re-read it.
 > - For functions that are very long or have many branches, trace all branches but you may summarize repeated patterns (e.g., "same DB call pattern as branch A").
@@ -367,7 +367,7 @@ Give each batch subagent the following instructions (substitute batch-specific v
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/nodejs-routes-batch-*.md` file and merge them into `sast/nodejs-routes.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/nodejs-routes-batch-*.md` file and merge them into `sast/nodejs-routes.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -426,14 +426,14 @@ multiple routes and may be high-value targets for vulnerability review.]
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes.
 - Phase 3 must run AFTER all Phase 2 batches complete.
-- Batch size is **3 routes per subagent**. For large projects with many routes, this produces many subagents — that is expected and correct.
-- Launch all batch subagents **in parallel** — do not run them sequentially.
+- Process batches of **3 routes each** sequentially. For large projects with many routes, this produces many batches — that is expected.
+- Process all batches sequentially — write results to batch files as you complete each one.
 - **This skill traces FORWARD from routes**, unlike other SAST skills that search for sinks and trace backward. The call tree is the primary output; the security-sensitive operation flags are annotations on the tree, not the final verdict.
-- **The taint annotation (🔴/🟡/🟢) is a best-effort assessment** made by the subagent reading the code. The other vulnerability skills (sast-sqli, sast-rce, sast-ssrf, etc.) should be run afterward to confirm exploitability — this skill identifies WHERE to look, not whether it's exploitable.
-- For very large projects (100+ routes), consider running this skill on a specific subdirectory or router file rather than the entire project. Pass a note to the Phase 1 subagent scoping the search.
+- **The taint annotation (🔴/🟡/🟢) is a best-effort assessment** made while reading the code. The other vulnerability skills (sast-sqli, sast-rce, sast-ssrf, etc.) should be run afterward to confirm exploitability — this skill identifies WHERE to look, not whether it's exploitable.
+- For very large projects (100+ routes), consider scoping the search to a specific subdirectory or router file rather than the entire project.
 - The Cross-Route Sensitive Operations Index in the output is especially useful: a DB helper called from 20 different routes is a higher-value target than one called from a single route.
-- When the Phase 2 subagent encounters a function definition it cannot find (import resolves to a path that doesn't exist or is ambiguous), it should mark it `[unresolved]` and continue — do not halt the trace.
+- When you encounter a function definition you cannot find (import resolves to a path that doesn't exist or is ambiguous), mark it `[unresolved]` and continue — do not halt the trace.
 - Clean up all intermediate files after writing the final `sast/nodejs-routes.md`.

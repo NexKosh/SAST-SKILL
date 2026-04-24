@@ -1,9 +1,9 @@
----
+﻿---
 name: sast-businesslogic
 description: >-
   Detect business logic vulnerabilities in a codebase using a three-phase
   approach: threat modeling (domain analysis and attack scenarios), batched
-  verify (check exploitable gaps in parallel subagents, 3 scenarios each),
+  verify (check exploitable gaps sequentially in batches of 3 scenarios each),
   and merge (consolidate batch results). Covers price manipulation, workflow
   bypass, limit violations, race conditions, reward abuse, etc. Requires
   sast/architecture.md (run sast-analysis first). Outputs findings to
@@ -13,7 +13,7 @@ description: >-
 
 # Business Logic Vulnerability Detection
 
-You are performing a focused security assessment to find business logic vulnerabilities in a codebase. This skill uses a three-phase approach with subagents: **threat modeling** (understand the domain and generate attack scenarios), **batched verify** (check whether scenarios are exploitable in parallel batches of 3), and **merge** (consolidate batch results).
+You are performing a focused security assessment to find business logic vulnerabilities in a codebase. This skill uses a three-phase approach: **threat modeling** (understand the domain and generate attack scenarios), **batched verify** (check whether scenarios are exploitable in parallel batches of 3), and **merge** (consolidate batch results).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -129,11 +129,11 @@ Use these categories to guide threat modeling. Not all categories apply to every
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Threat Modeling — Domain Analysis & Attack Scenario Generation
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Analyze the codebase to understand its business domain and generate a concrete, prioritized list of business logic attack scenarios specific to this application. Write results to `sast/businesslogic-threats.md`.
 >
@@ -209,19 +209,28 @@ Launch a subagent with the following instructions:
 
 ### Phase 2: Verify — Check Whether Scenarios Are Exploitable (Batched)
 
-After Phase 1 completes, read `sast/businesslogic-threats.md` and split the attack scenarios into **batches of up to 3 scenarios each**. Launch **one subagent per batch in parallel**. Each subagent verifies only its assigned scenarios and writes results to its own batch file.
+After Phase 1 completes, read `sast/businesslogic-threats.md` and split the attack scenarios into **batches of up to 3 scenarios each**. Process each batch **sequentially**. For each batch, verify only the assigned scenarios and write results to the batch file.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/businesslogic-threats.md` and count the numbered scenario sections (`### 1.`, `### 2.`, etc.).
 2. Divide them into batches of up to 3. For example, 8 scenarios → 3 batches (1–3, 4–6, 7–8).
 3. For each batch, extract the full text of those scenario sections from the threats file.
-4. Launch all batch subagents **in parallel**, passing each one only its assigned scenarios.
-5. Each subagent writes to `sast/businesslogic-batch-N.md` where N is the 1-based batch number.
+4. Process each batch sequentially, working through each one only its assigned scenarios.
+5. Write results to `sast/businesslogic-batch-N.md` where N is the 1-based batch number.
 
-Give each batch subagent the following instructions (substitute the batch-specific values):
+For each batch, apply the following analysis directly (substitute the batch-specific values):
 
 > **Goal**: For each assigned attack scenario, determine whether the business rule is properly enforced in code or whether the attack is exploitable. Our goal is to find business logic vulnerabilities. Write results to `sast/businesslogic-batch-[N].md`.
+>
+> **Step 0 — Cross-reference with route call graph (Node.js / Next.js projects)**:
+> If `sast/nodejs-routes.md` exists, do the following BEFORE analyzing each scenario:
+> 1. Find the scenario's target endpoint or handler in the call graph.
+> 2. Use the call tree to identify ALL functions involved in the business logic flow — this shows you exactly which helpers, services, and validators are called, without needing to manually trace imports.
+> 3. For Next.js route groups: the folder name `(groupName)` does NOT appear in the URL. `app/(dashboard)/orders/page.tsx` is served at `/orders`. Verify the actual effective URL when matching against the scenario's target.
+> 4. Server Actions (`'use server'` functions) are direct mutation entry points — check whether they validate business rules before committing state changes.
+>
+> **Minimum trace depth**: When verifying that a business rule IS enforced, read the implementation of every validation function at least 5 hops deep. Do not assume a function named `validateOrder()` actually enforces all necessary checks without reading it.
 >
 > **Your assigned scenarios** (from the threat modeling phase):
 >
@@ -329,7 +338,7 @@ Give each batch subagent the following instructions (substitute the batch-specif
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/businesslogic-batch-*.md` file and merge them into a single `sast/businesslogic-results.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/businesslogic-batch-*.md` file and merge them into a single `sast/businesslogic-results.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -361,12 +370,12 @@ After **all** Phase 2 batch subagents complete, read every `sast/businesslogic-b
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run **after** Phase 1 completes — it depends on the threat model output.
 - Phase 3 must run **after** all Phase 2 batches complete — it depends on all batch outputs.
-- Batch size is **3 scenarios per subagent**. If there are 1–3 scenarios total, use a single subagent. If there are 10, use 4 subagents (3+3+3+1).
-- Launch all batch subagents **in parallel** — do not run them sequentially.
-- Each batch subagent receives only its assigned scenarios' text from the threats file, not the entire threats file. This keeps each subagent's context small and focused.
+- Process batches of up to **3 scenarios each** sequentially. If there are 1-3 scenarios total, treat it as a single batch.
+- Process all batches sequentially — write results to batch files as you complete each one.
+- For each batch, work only from the assigned scenarios' text from the threats file, not the entire file. This keeps each batch focused.
 - Focus strictly on **business logic flaws** — do not flag injection bugs, auth bypass, or IDOR issues here.
 - Threat modeling in Phase 1 should be **application-specific**: generic scenarios not grounded in the actual codebase are not useful.
 - Server-side validation is the only valid protection. Client-side validation, frontend form constraints, and API documentation that says "must be positive" are not security controls.

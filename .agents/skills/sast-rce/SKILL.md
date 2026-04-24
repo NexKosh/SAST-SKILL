@@ -1,9 +1,9 @@
----
+﻿---
 name: sast-rce
 description: >-
   Detect Remote Code Execution (RCE) vulnerabilities in a codebase using a
   three-phase approach: recon (find dangerous execution sinks), batched verify
-  (trace user input to sinks in parallel subagents, 3 sinks each), and merge
+  (trace user input to sinks sequentially in batches of 3 sinks each), and merge
   (consolidate batch results). Covers OS command injection, eval-like sinks,
   and unsafe deserialization. Requires sast/architecture.md (run sast-analysis
   first). Outputs findings to sast/rce-results.md. Use when asked to find RCE,
@@ -12,7 +12,7 @@ description: >-
 
 # Remote Code Execution (RCE) Detection
 
-You are performing a focused security assessment to find Remote Code Execution vulnerabilities in a codebase. This skill uses a three-phase approach with subagents: **recon** (find dangerous execution sinks), **batched verify** (trace whether user-supplied input reaches each sink in parallel batches of 3), and **merge** (consolidate batch results into the final report).
+You are performing a focused security assessment to find Remote Code Execution vulnerabilities in a codebase. This skill uses a three-phase approach: **recon** (find dangerous execution sinks), **batched verify** (trace whether user-supplied input reaches each sink in parallel batches of 3), and **merge** (consolidate batch results into the final report).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -374,11 +374,11 @@ data = yaml.safe_load(user_input)  # only loads basic data types
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Find Dangerous Execution Sinks
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Find every location in the codebase where OS commands are executed, code is dynamically evaluated, or data is deserialized using an unsafe deserializer. Flag ANY dynamic variable passed to these sinks, regardless of where it originates. Write results to `sast/rce-recon.md`.
 >
@@ -539,20 +539,30 @@ Only proceed to Phase 2 if Phase 1 found at least one potential sink.
 
 ### Phase 2: Trace User Input to Sinks (Batched)
 
-After Phase 1 completes, read `sast/rce-recon.md` and split the sinks into **batches of up to 3 sinks each** (numbered sections under `## Sinks Found`: `### 1.`, `### 2.`, etc.). Launch **one subagent per batch in parallel**. Each subagent traces taint only for its assigned sinks and writes results to its own batch file.
+After Phase 1 completes, read `sast/rce-recon.md` and split the sinks into **batches of up to 3 sinks each** (numbered sections under `## Sinks Found`: `### 1.`, `### 2.`, etc.). Process each batch **sequentially**. For each batch, trace taint only for the assigned sinks and write results to the batch file.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/rce-recon.md` and count the numbered sink sections (`### 1.`, `### 2.`, ...).
 2. Divide them into batches of up to 3. For example, 8 sinks → 3 batches (1-3, 4-6, 7-8).
 3. For each batch, extract the full text of those sink sections from the recon file.
-4. Launch all batch subagents **in parallel**, passing each one only its assigned sinks.
-5. Each subagent writes to `sast/rce-batch-N.md` where N is the 1-based batch number.
-6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project is Python-focused, include the Python OS command, eval, pickle, and YAML subsections that apply. Include these selected examples in each subagent's instructions where indicated by `[TECH-STACK EXAMPLES]` below.
+4. Process each batch sequentially, working through each one only its assigned sinks.
+5. Write results to `sast/rce-batch-N.md` where N is the 1-based batch number.
+6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project is Python-focused, include the Python OS command, eval, pickle, and YAML subsections that apply. Include these selected examples for the current batch where indicated by `[TECH-STACK EXAMPLES]` below.
 
-Give each batch subagent the following instructions (substitute the batch-specific values):
+For each batch, apply the following analysis directly (substitute the batch-specific values):
 
 > **Goal**: For each assigned RCE sink, determine whether a user-supplied value reaches the dangerous argument. Our goal is to find code execution vulnerabilities. Write results to `sast/rce-batch-[N].md`.
+>
+> **Step 0 — Cross-reference with route call graph (Node.js / Next.js projects)**:
+> If `sast/nodejs-routes.md` exists, do the following BEFORE any backward tracing:
+> 1. Search the file for each assigned sink's file path or function name. Look specifically for ⚠️ [CMD] or ⚠️ [EVAL] flags in the call tree.
+> 2. If found with 🔴 user-tainted → confirmed user-controlled input reaches this dangerous operation. Record the route and call chain; classify directly without full re-tracing.
+> 3. If found but marked 🟡 unknown → use the call tree as your starting map, then continue backward tracing to resolve.
+> 4. If NOT found in the call graph → perform the full backward tracing described below.
+> **Next.js**: `searchParams` and `params` in any `page.tsx` are ALWAYS user-controlled. `formData` in `'use server'` functions is ALWAYS user-controlled. Route group folders do NOT appear in URLs.
+>
+> **Minimum trace depth**: Never conclude a value is server-side only after fewer than 5 function hops. Document every hop with arrow notation: `handlerFn() → helperA() → serviceB() → sink()`. Never stop at "the value comes from a function parameter" — follow that parameter to its actual origin.
 >
 > **Your assigned sinks** (from the recon phase):
 >
@@ -677,7 +687,7 @@ Give each batch subagent the following instructions (substitute the batch-specif
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/rce-batch-*.md` file and merge them into a single `sast/rce-results.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/rce-batch-*.md` file and merge them into a single `sast/rce-results.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -709,12 +719,12 @@ After **all** Phase 2 batch subagents complete, read every `sast/rce-batch-*.md`
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes — it depends on the recon output.
 - Phase 3 must run AFTER all Phase 2 batches complete — it depends on all batch outputs.
-- Batch size is **3 sinks per subagent**. If there are 1-3 sinks total, use a single subagent. If there are 10, use 4 subagents (3+3+3+1).
-- Launch all batch subagents **in parallel** — do not run them sequentially.
-- Each batch subagent receives only its assigned sinks' text from the recon file, not the entire recon file. This keeps each subagent's context small and focused.
+- Process batches of up to **3 sinks each** sequentially. If there are 1-3 sinks total, treat it as a single batch.
+- Process all batches sequentially — write results to batch files as you complete each one.
+- For each batch, work only from the assigned sinks' text from the recon file, not the entire file. This keeps each batch focused.
 - **Phase 1 is purely structural**: flag any sink where a non-constant variable appears in a dangerous position, regardless of where that variable comes from. Do not trace user input in Phase 1.
 - **Phase 2 is purely taint analysis**: for each sink found in Phase 1, trace the dynamic argument back to its origin. If it comes from a user-controlled source, the site is a real vulnerability.
 - **For deserialization sinks**: any externally-controllable byte stream is dangerous — HTTP bodies, cookies, file uploads, WebSocket frames, queue messages. Be conservative and flag all deserialization sinks where data flow from an external source cannot be ruled out.

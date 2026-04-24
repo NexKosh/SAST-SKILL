@@ -1,4 +1,4 @@
----
+﻿---
 name: sast-jwt
 description: >-
   Detect insecure JWT (JSON Web Token) implementations in a codebase using a
@@ -14,7 +14,7 @@ description: >-
 
 # JWT Vulnerability Detection
 
-You are performing a focused security assessment to find insecure JSON Web Token (JWT) implementations. This skill uses a two-phase approach with subagents: **recon** (map the full JWT lifecycle — issuance, verification, and configuration) then **analysis** (identify every exploitable weakness in those verification sites).
+You are performing a focused security assessment to find insecure JSON Web Token (JWT) implementations. This skill uses a two-phase approach: **recon** (map the full JWT lifecycle — issuance, verification, and configuration) then **analysis** (identify every exploitable weakness in those verification sites).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -251,11 +251,11 @@ jwt.verify(token, trustedKey, { algorithms: ['RS256'] });
 
 ## Execution
 
-This skill runs in two phases using subagents. Pass the contents of `sast/architecture.md` to both subagents as context.
+This skill runs in two phases in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Map the JWT Lifecycle
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Map how the application creates, transmits, and verifies JWTs. Identify every JWT issuance and verification site, the library used, the signing algorithm and key/secret configuration, and the claims that are used for authorization. Write results to `sast/jwt-recon.md`.
 >
@@ -364,7 +364,7 @@ Only proceed to Phase 2 if Phase 1 found at least one JWT verification site.
 
 ### Phase 2: Analyze JWT Verification Sites for Vulnerabilities
 
-Launch a second subagent **after Phase 1 completes** with the following instructions:
+**After Phase 1 completes, do the following directly:**
 
 > **Goal**: For each JWT verification site in `sast/jwt-recon.md`, determine whether it is exploitable. Check for algorithm confusion, missing signature verification, weak secrets, header injection attacks, and missing claim validation. Write final results to `sast/jwt-results.md`.
 >
@@ -474,7 +474,7 @@ Launch a second subagent **after Phase 1 completes** with the following instruct
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to both subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes — it depends on the recon output.
 - **Phase 1 is purely discovery**: locate every JWT issuance, verification, and configuration site. Do not attempt to assess security in Phase 1 — that is Phase 2's job.
 - **Phase 2 is purely analysis**: for each verification site found in Phase 1, systematically check every vulnerability class. Do not search for new sites in Phase 2 — focus on what Phase 1 found.

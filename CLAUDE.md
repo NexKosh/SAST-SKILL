@@ -16,7 +16,7 @@ Run the `sast-analysis` skill directly (this one stays in-session since later st
 
 ## Step 1b: Node.js Route Call Graph (Node.js projects only)
 
-Check if the project uses Node.js (look at `sast/architecture.md` — if the Languages or Frameworks row mentions Node.js, Express, NestJS, Fastify, Koa, Hapi, or similar).
+Check if the project uses Node.js (look at `sast/architecture.md` — if the Languages or Frameworks row mentions Node.js, Express, NestJS, Fastify, Koa, Hapi, Next.js, Nuxt, Remix, or any JavaScript/TypeScript backend or full-stack framework).
 
 - **If Node.js is detected** and `sast/nodejs-routes.md` does not already exist: run `sast-nodejs-routes` in-session now. This enumerates every API route and builds a full recursive call graph for each handler. Later skills will use this as additional context.
 - **If not a Node.js project**, or if `sast/nodejs-routes.md` already exists: skip this step.
@@ -25,9 +25,9 @@ Check if the project uses Node.js (look at `sast/architecture.md` — if the Lan
 
 ---
 
-## Step 2: Vulnerability Detection (Parallel)
+## Step 2: Vulnerability Detection (Sequential)
 
-Run all checks at the same time. Skip any task where the output file already exists.
+Run each skill one at a time in your current context — do NOT spawn subagents. Skip any skill where the output file already exists.
 
 - Skip IDOR if `sast/idor-results.md` already exists.
 - Skip SQLi if `sast/sqli-results.md` already exists.
@@ -45,15 +45,11 @@ Run all checks at the same time. Skip any task where the output file already exi
 - Skip Hardcoded Secrets if `sast/hardcodedsecrets-results.md` already exists.
 - Skip Node.js if `sast/nodejs-results.md` already exists.
 
-Start **one subagent per check**, all **in parallel**, each with a dedicated task.
+Before running each skill: read `sast/architecture.md`. If `sast/nodejs-routes.md` exists, also read it — then follow this process during each skill's Phase 2: (1) Search `sast/nodejs-routes.md` for each sink's file path or function name. (2) If the sink appears in a route's call tree marked 🔴 user-tainted, use that call chain as taint evidence directly without re-tracing. (3) If marked 🟡 unknown, use the call tree as a starting map. (4) Only re-trace from scratch for sinks not found in the call graph. This is mandatory for Next.js projects — route group folders like `(dashboard)` do NOT appear in URLs, and the call graph already resolves these mappings.
 
-**For Node.js projects**: if `sast/nodejs-routes.md` exists, pass its contents to each subagent as additional context alongside `sast/architecture.md`. The route call graph shows exactly which routes call which functions — use it to prioritize which sinks have reachable user-input paths.
+Run each skill in sequence using the table below. Write all findings to the results file. Clean up any intermediate files when done.
 
-Give each subagent the same instruction pattern, using the skill name and paths from the table:
-
-> Read `sast/architecture.md` for context. If `sast/nodejs-routes.md` exists, also read it — it contains the full API route → call graph map and will help you identify which sinks are reachable from user-controlled entry points. Then run the named SAST skill. Write all findings to that skill's results file. Clean up any intermediate recon or threat files for that skill when done.
-
-| Skill | Results file | Typical intermediate files to clean |
+| Skill | Results file | Intermediate files to clean |
 |-------|----------------|--------------------------------------|
 | sast-idor | `sast/idor-results.md` | `sast/idor-recon.md` |
 | sast-sqli | `sast/sqli-results.md` | `sast/sqli-recon.md`, `sast/sqli-batch-*.md` |
@@ -71,16 +67,14 @@ Give each subagent the same instruction pattern, using the skill name and paths 
 | sast-hardcodedsecrets | `sast/hardcodedsecrets-results.md` | `sast/hardcodedsecrets-recon.md`, `sast/hardcodedsecrets-batch-*.md` |
 | sast-nodejs | `sast/nodejs-results.md` | `sast/nodejs-recon.md`, `sast/nodejs-batch-*.md` |
 
-Wait for all subagents to finish before proceeding.
+Complete all skills before proceeding to Step 3.
 
 ---
 
 ## Step 3: Report Generation
 
-After all subagents from Step 2 finish, generate the final consolidated report.
+After all skills in Step 2 complete, generate the final consolidated report.
 
 Skip this step if `sast/final-report.md` already exists.
 
-Launch a single subagent:
-
-> Read all available `sast/*-results.md` files, `sast/architecture.md`, and (if it exists) `sast/nodejs-routes.md` for context, then run the sast-report skill to generate `sast/final-report.md` with all findings ranked by severity and confidentiality impact.
+Read all available `sast/*-results.md` files, `sast/architecture.md`, and (if it exists) `sast/nodejs-routes.md` for context, then run the `sast-report` skill directly in your current context to generate `sast/final-report.md` with all findings ranked by severity and confidentiality impact.

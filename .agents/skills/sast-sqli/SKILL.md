@@ -1,9 +1,9 @@
----
+﻿---
 name: sast-sqli
 description: >-
   Detect SQL injection vulnerabilities in a codebase using a three-phase approach:
   recon (find unsafe SQL construction sites), batched verify (trace user input to
-  those sites in parallel subagents, 3 sites each), and merge (consolidate batch
+  those sites sequentially in batches of 3 sites each), and merge (consolidate batch
   results). Covers string concat, f-strings, unsafe ORM methods, and dynamic
   identifiers. Requires sast/architecture.md (run sast-analysis first). Outputs
   findings to sast/sqli-results.md. Use when asked to find SQLi or database
@@ -12,7 +12,7 @@ description: >-
 
 # SQL Injection (SQLi) Detection
 
-You are performing a focused security assessment to find SQL injection vulnerabilities in a codebase. This skill uses a three-phase approach with subagents: **recon** (find vulnerable SQL construction sites), **batched verify** (taint analysis in parallel batches of 3), and **merge** (consolidate batch reports into one file).
+You are performing a focused security assessment to find SQL injection vulnerabilities in a codebase. This skill uses a three-phase approach: **recon** (find vulnerable SQL construction sites), **batched verify** (taint analysis in parallel batches of 3), and **merge** (consolidate batch reports into one file).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -295,11 +295,11 @@ cursor.execute(f"SELECT * FROM products ORDER BY {sort_col}")
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Recon — Find Vulnerable SQL Construction Sites
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Find every location in the codebase where a SQL query is constructed in a vulnerable way — using string concatenation, interpolation, or formatting with any variable (regardless of where that variable comes from). Write results to `sast/sqli-recon.md`.
 >
@@ -381,20 +381,30 @@ Only proceed to Phase 2 if Phase 1 found at least one vulnerable construction si
 
 ### Phase 2: Verify — Taint Analysis (Batched)
 
-After Phase 1 completes, read `sast/sqli-recon.md` and split the construction sites into **batches of up to 3 sites each**. Launch **one subagent per batch in parallel**. Each subagent traces user input only for its assigned sites and writes results to its own batch file.
+After Phase 1 completes, read `sast/sqli-recon.md` and split the construction sites into **batches of up to 3 sites each**. Process each batch **sequentially**. For each batch, trace user input only for the assigned sites and write results to the batch file.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/sqli-recon.md` and count the numbered site sections under "Vulnerable Construction Sites" (### 1., ### 2., etc.).
 2. Divide them into batches of up to 3. For example, 8 sites → 3 batches (1-3, 4-6, 7-8).
 3. For each batch, extract the full text of those site sections from the recon file.
-4. Launch all batch subagents **in parallel**, passing each one only its assigned sites.
-5. Each subagent writes to `sast/sqli-batch-N.md` where N is the 1-based batch number.
-6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project uses Node.js with `pg`, include the "Node.js — pg (PostgreSQL)" and related Node examples. Include these selected examples in each subagent's instructions where indicated by `[TECH-STACK EXAMPLES]` below.
+4. Process each batch sequentially, working through each one only its assigned sites.
+5. Write results to `sast/sqli-batch-N.md` where N is the 1-based batch number.
+6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project uses Node.js with `pg`, include the "Node.js — pg (PostgreSQL)" and related Node examples. Include these selected examples for the current batch where indicated by `[TECH-STACK EXAMPLES]` below.
 
-Give each batch subagent the following instructions (substitute the batch-specific values):
+For each batch, apply the following analysis directly (substitute the batch-specific values):
 
 > **Goal**: For each assigned vulnerable SQL construction site, determine whether a user-supplied value reaches the interpolated variable. Our goal is to find SQL injection vulnerabilities. Write results to `sast/sqli-batch-[N].md`.
+>
+> **Step 0 — Cross-reference with route call graph (Node.js / Next.js projects)**:
+> If `sast/nodejs-routes.md` exists, do the following BEFORE any backward tracing:
+> 1. Search the file for each assigned sink's file path or function name.
+> 2. If found in a route call tree with 🔴 user-tainted → confirmed user-controlled input. Record the route and call chain as the taint trace; classify directly without full re-tracing.
+> 3. If found but marked 🟡 unknown → use the call tree as your starting map, then continue backward tracing to resolve.
+> 4. If NOT found in the call graph → perform the full backward tracing described below.
+> **Next.js**: `searchParams` and `params` props in any `page.tsx` are ALWAYS user-controlled (URL query string and dynamic route segments). `formData` in `'use server'` functions is ALWAYS user-controlled. Treat these as tainted without further proof. Route group folders like `(dashboard)` do NOT appear in URLs — `app/(dashboard)/reports/page.tsx` is served at `/reports`.
+>
+> **Minimum trace depth**: Never conclude a value is server-side only after fewer than 5 function hops. Document every hop with arrow notation: `handlerFn() → helperA() → serviceB() → sink()`. Never stop at "the value comes from a function parameter" — follow that parameter to its actual origin.
 >
 > **Your assigned construction sites** (from the recon phase):
 >
@@ -498,7 +508,7 @@ Give each batch subagent the following instructions (substitute the batch-specif
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/sqli-batch-*.md` file and merge them into a single `sast/sqli-results.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/sqli-batch-*.md` file and merge them into a single `sast/sqli-results.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -530,12 +540,12 @@ After **all** Phase 2 batch subagents complete, read every `sast/sqli-batch-*.md
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes — it depends on the recon output.
 - Phase 3 must run AFTER all Phase 2 batches complete — it depends on all batch outputs.
-- Batch size is **3 construction sites per subagent**. If there are 1-3 sites total, use a single subagent. If there are 10, use 4 subagents (3+3+3+1).
-- Launch all batch subagents **in parallel** — do not run them sequentially.
-- Each batch subagent receives only its assigned sites' text from the recon file, not the entire recon file. This keeps each subagent's context small and focused.
+- Process batches of up to **3 construction sites each** sequentially. If there are 1-3 sites total, treat it as a single batch.
+- Process all batches sequentially — write results to batch files as you complete each one.
+- For each batch, work only from the assigned sites' text from the recon file, not the entire file. This keeps each batch focused.
 - **Phase 1 is purely structural**: flag any dynamic variable embedded in a SQL query string, regardless of origin. Do not trace user input in Phase 1 — that is Phase 2's job.
 - **Phase 2 is purely taint analysis**: for each assigned site, trace the interpolated variable back to its origin. If it comes from a user-controlled source, the site is a real vulnerability.
 - Focus on **raw SQL and ORM raw/unsafe methods**. Standard ORM query builder calls (`.filter()`, `.where(col: val)`, `.find()`) are safe by default — do not flag them.

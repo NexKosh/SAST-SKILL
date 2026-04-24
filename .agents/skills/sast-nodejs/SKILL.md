@@ -1,9 +1,9 @@
----
+﻿---
 name: sast-nodejs
 description: >-
   Detect Node.js-specific vulnerabilities in a codebase using a three-phase
   approach: recon (find NoSQL injection, prototype pollution, and mass assignment
-  sinks), batched verify (trace user input to sinks in parallel subagents, 3
+  sinks), batched verify (trace user input to sinks sequentially in batches of 3
   sinks each), and merge (consolidate batch results). Covers MongoDB operator
   injection, lodash/deepmerge prototype pollution, and Mongoose/Sequelize/TypeORM
   mass assignment. Requires sast/architecture.md (run sast-analysis first).
@@ -14,7 +14,7 @@ description: >-
 
 # Node.js Specific Vulnerability Detection
 
-You are performing a focused security assessment to find Node.js-specific vulnerabilities in a codebase. This skill uses a three-phase approach with subagents: **recon** (find NoSQL injection, prototype pollution, and mass assignment sinks), **batched verify** (trace whether user-supplied input reaches each sink, in parallel batches of 3), and **merge** (consolidate batch results into the final report).
+You are performing a focused security assessment to find Node.js-specific vulnerabilities in a codebase. This skill uses a three-phase approach: **recon** (find NoSQL injection, prototype pollution, and mass assignment sinks), **batched verify** (trace whether user-supplied input reaches each sink, in parallel batches of 3), and **merge** (consolidate batch results into the final report).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -271,11 +271,11 @@ app.put('/profile/:id', async (req, res) => {
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Recon — Find NoSQL Injection, Prototype Pollution, and Mass Assignment Sinks
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Find every location in the codebase where a NoSQL injection, prototype pollution, or mass assignment vulnerability may exist. Flag ANY site where user-controlled data could reach a dangerous operation. Write results to `sast/nodejs-recon.md`.
 >
@@ -360,19 +360,29 @@ Only proceed to Phase 2 if Phase 1 found at least one potential sink.
 
 ### Phase 2: Verify — Taint Analysis (Batched)
 
-After Phase 1 completes, read `sast/nodejs-recon.md` and split the sinks into **batches of up to 3 sinks each**. Launch **one subagent per batch in parallel**. Each subagent traces taint only for its assigned sinks and writes results to its own batch file.
+After Phase 1 completes, read `sast/nodejs-recon.md` and split the sinks into **batches of up to 3 sinks each**. Process each batch **sequentially**. For each batch, trace taint only for the assigned sinks and write results to the batch file.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/nodejs-recon.md` and count the numbered sink sections (`### 1.`, `### 2.`, ...) under "Sinks Found".
 2. Divide them into batches of up to 3. For example, 7 sinks → 3 batches (1-3, 4-6, 7).
 3. For each batch, extract the full text of those sink sections from the recon file.
-4. Launch all batch subagents **in parallel**, passing each one only its assigned sinks.
-5. Each subagent writes to `sast/nodejs-batch-N.md` where N is the 1-based batch number.
+4. Process each batch sequentially, working through each one only its assigned sinks.
+5. Write results to `sast/nodejs-batch-N.md` where N is the 1-based batch number.
 
-Give each batch subagent the following instructions (substitute batch-specific values):
+For each batch, apply the following analysis (substitute batch-specific values):
 
 > **Goal**: For each assigned Node.js vulnerability sink, determine whether a user-supplied value reaches the dangerous argument. Write results to `sast/nodejs-batch-[N].md`.
+>
+> **Step 0 — Cross-reference with route call graph (Node.js / Next.js projects)**:
+> If `sast/nodejs-routes.md` exists, do the following BEFORE any backward tracing:
+> 1. Search the file for each assigned sink's file path or function name.
+> 2. If found in a route call tree with 🔴 user-tainted → confirmed user-controlled input. Record the route and call chain as the taint trace; classify directly without full re-tracing.
+> 3. If found but marked 🟡 unknown → use the call tree as your starting map, then continue backward tracing to resolve.
+> 4. If NOT found in the call graph → perform the full backward tracing described below.
+> **Next.js**: `searchParams` and `params` in any `page.tsx` are ALWAYS user-controlled. `formData` in `'use server'` functions is ALWAYS user-controlled. Route group folders do NOT appear in URLs — `app/(dashboard)/reports/page.tsx` is served at `/reports`.
+>
+> **Minimum trace depth**: Never conclude a value is server-side only after fewer than 5 function hops. Document every hop with arrow notation: `handlerFn() → helperA() → serviceB() → sink()`. Never stop at "the value comes from a function parameter" — follow that parameter to its actual origin.
 >
 > **Your assigned sinks** (from the recon phase):
 >
@@ -488,7 +498,7 @@ Give each batch subagent the following instructions (substitute batch-specific v
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/nodejs-batch-*.md` file and merge them into a single `sast/nodejs-results.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/nodejs-batch-*.md` file and merge them into a single `sast/nodejs-results.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -520,12 +530,12 @@ After **all** Phase 2 batch subagents complete, read every `sast/nodejs-batch-*.
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes — it depends on the recon output.
 - Phase 3 must run AFTER all Phase 2 batches complete — it depends on all batch outputs.
-- Batch size is **3 sinks per subagent**. If there are 1-3 sinks total, use a single subagent.
-- Launch all batch subagents **in parallel** — do not run them sequentially.
-- Each batch subagent receives only its assigned sinks' text from the recon file.
+- Process batches of up to **3 sinks each** sequentially. If there are 1-3 sinks total, treat it as a single batch.
+- Process all batches sequentially — write results to batch files as you complete each one.
+- For each batch, work only from the assigned sinks' text from the recon file.
 - **Phase 1 is purely structural**: flag any sink where the argument is or may contain user data. Do not do taint analysis in Phase 1.
 - **Phase 2 is purely taint analysis**: for each sink, trace the argument back to its origin. Use deep internal call tracing — follow all project-defined functions, no layer limit.
 - For NoSQL injection: `Model.find({ field: req.query.field })` is flagged in Phase 1 because Express `qs` parses `?field[$gt]=` as an object. Phase 2 determines if type validation is present.

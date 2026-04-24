@@ -1,17 +1,17 @@
----
+﻿---
 name: sast-ssti
 description: >-
   Detect Server-Side Template Injection (SSTI) vulnerabilities in a codebase
   using a three-phase approach: recon (find template rendering sites that use
   dynamic strings), batched verify (trace user input to those sites in parallel
-  subagents, 3 candidates each), and merge (consolidate batch results). Requires
+  sequential batches of 3 candidates each), and merge (consolidate batch results). Requires
   sast/architecture.md (run sast-analysis first). Outputs findings to
   sast/ssti-results.md. Use when asked to find SSTI or template injection bugs.
 ---
 
 # Server-Side Template Injection (SSTI) Detection
 
-You are performing a focused security assessment to find Server-Side Template Injection vulnerabilities in a codebase. This skill uses a three-phase approach with subagents: **recon** (find candidate rendering sites where the template string is dynamic), **batched verify** (trace whether user input reaches each site's template argument, in parallel batches of 3), and **merge** (consolidate batch results into the final report).
+You are performing a focused security assessment to find Server-Side Template Injection vulnerabilities in a codebase. This skill uses a three-phase approach: **recon** (find candidate rendering sites where the template string is dynamic), **batched verify** (trace whether user input reaches each site's template argument, in parallel batches of 3), and **merge** (consolidate batch results into the final report).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -304,11 +304,11 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Find Template Rendering Sites Using Dynamic Strings
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Find every location in the codebase where a template engine renders, compiles, or evaluates a **dynamically built string** as the template itself — rather than loading a static template file. Write results to `sast/ssti-recon.md`.
 >
@@ -440,20 +440,30 @@ Only proceed to Phase 2 if Phase 1 found at least one candidate rendering site.
 
 ### Phase 2: Verify — Trace User Input (Batched)
 
-After Phase 1 completes, read `sast/ssti-recon.md` and split the candidate rendering sites into **batches of up to 3 candidates each**. Launch **one subagent per batch in parallel**. Each subagent traces taint for only its assigned candidates and writes results to its own batch file.
+After Phase 1 completes, read `sast/ssti-recon.md` and split the candidate rendering sites into **batches of up to 3 candidates each**. Process each batch **sequentially**. For each batch, trace taint only for the assigned candidates and write results to the batch file.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/ssti-recon.md` and count the numbered candidate sections under "Candidate Rendering Sites" (`### 1.`, `### 2.`, etc.).
 2. Divide them into batches of up to 3. For example, 8 candidates → 3 batches (1-3, 4-6, 7-8).
 3. For each batch, extract the full text of those candidate sections from the recon file.
-4. Launch all batch subagents **in parallel**, passing each one only its assigned candidates.
-5. Each subagent writes to `sast/ssti-batch-N.md` where N is the 1-based batch number.
-6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project uses Python/Flask with Jinja2, include only the "Python — Flask / Jinja2" examples. Include these selected examples in each subagent's instructions where indicated by `[TECH-STACK EXAMPLES]` below.
+4. Process each batch sequentially, working through each one only its assigned candidates.
+5. Write results to `sast/ssti-batch-N.md` where N is the 1-based batch number.
+6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project uses Python/Flask with Jinja2, include only the "Python — Flask / Jinja2" examples. Include these selected examples for the current batch where indicated by `[TECH-STACK EXAMPLES]` below.
 
-Give each batch subagent the following instructions (substitute the batch-specific values):
+For each batch, apply the following analysis directly (substitute the batch-specific values):
 
-> **Goal**: For each assigned candidate rendering site, determine whether a user-supplied value reaches the dynamic template string argument. Our goal is to find SSTI vulnerabilities.Write results to `sast/ssti-batch-[N].md`.
+> **Goal**: For each assigned candidate rendering site, determine whether a user-supplied value reaches the dynamic template string argument. Our goal is to find SSTI vulnerabilities. Write results to `sast/ssti-batch-[N].md`.
+>
+> **Step 0 — Cross-reference with route call graph (Node.js / Next.js projects)**:
+> If `sast/nodejs-routes.md` exists, do the following BEFORE any backward tracing:
+> 1. Search the file for each assigned rendering site's file path or function name. Look for ⚠️ [TEMPLATE] flags in the call tree.
+> 2. If found with 🔴 user-tainted → confirmed user-controlled input reaches the template engine. Use the call chain as the taint trace; classify directly.
+> 3. If found but marked 🟡 unknown → use the call tree as your starting map, then continue backward tracing to resolve.
+> 4. If NOT found → perform the full backward tracing described below.
+> **Next.js**: `searchParams` and `params` in `page.tsx` are ALWAYS user-controlled. If these flow into any template engine call (`ejs.render()`, `handlebars.compile()`, etc.), flag as SSTI candidate. Route group folders do NOT appear in URLs.
+>
+> **Minimum trace depth**: Never conclude a value is server-side only after fewer than 5 function hops. Document every hop with arrow notation.
 >
 > **Your assigned candidates** (from the recon phase):
 >
@@ -571,7 +581,7 @@ Give each batch subagent the following instructions (substitute the batch-specif
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/ssti-batch-*.md` file and merge them into a single `sast/ssti-results.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/ssti-batch-*.md` file and merge them into a single `sast/ssti-results.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -603,12 +613,12 @@ After **all** Phase 2 batch subagents complete, read every `sast/ssti-batch-*.md
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes — it depends on the recon output.
 - Phase 3 must run AFTER all Phase 2 batches complete — it depends on all batch outputs.
-- Batch size is **3 candidates per subagent**. If there are 1-3 candidates total, use a single subagent. If there are 10, use 4 subagents (3+3+3+1).
-- Launch all batch subagents **in parallel** — do not run them sequentially.
-- Each batch subagent receives only its assigned candidates' text from the recon file, not the entire recon file. This keeps each subagent's context small and focused.
+- Process batches of up to **3 candidates each** sequentially. If there are 1-3 candidates total, treat it as a single batch.
+- Process all batches sequentially — write results to batch files as you complete each one.
+- For each batch, work only from the assigned candidates' text from the recon file, not the entire file. This keeps each batch focused.
 - **Phase 1 is purely structural**: flag any dynamic (non-literal) variable used as the template string argument. Do not attempt to trace user input in Phase 1 — that is Phase 2's job.
 - **Phase 2 is purely taint analysis**: for each site assigned to a batch, trace the dynamic template argument back to its origin. If it comes from a user-controlled source, the site is a real vulnerability.
 - The critical distinction is **template string vs. template context**: user input passed as a *variable name/value* inside `render_template("page.html", user=input)` is safe. User input passed as the *template string itself* to `render_template_string(input)` is dangerous.

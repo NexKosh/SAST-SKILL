@@ -1,9 +1,9 @@
----
+﻿---
 name: sast-fileupload
 description: >-
   Detect insecure file upload vulnerabilities in a codebase using a three-phase
   approach: discovery (find all upload sites), batched verify (check extension
-  bypass and related issues in parallel subagents, 3 sites each), and merge
+  bypass and related issues sequentially in batches of 3 sites), and merge
   (consolidate batch results). Requires sast/architecture.md (run sast-analysis
   first). Outputs findings to sast/fileupload-results.md. Use when asked to find
   file upload, unrestricted upload, or extension bypass bugs.
@@ -11,7 +11,7 @@ description: >-
 
 # Insecure File Upload Detection
 
-You are performing a focused security assessment to find insecure file upload vulnerabilities in a codebase. This skill uses a three-phase approach with subagents: **discovery** (find all places where uploaded files are received and stored), **batched verify** (check bypass vectors in parallel batches of up to 3 upload sites each), and **merge** (consolidate batch reports into one results file).
+You are performing a focused security assessment to find insecure file upload vulnerabilities in a codebase. This skill uses a three-phase approach: **discovery** (find all places where uploaded files are received and stored), **batched verify** (check bypass vectors in parallel batches of up to 3 upload sites each), and **merge** (consolidate batch reports into one results file).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -349,11 +349,11 @@ public async Task<IActionResult> Upload(IFormFile file) {
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Find All File Upload Sites
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Find every location in the codebase where files uploaded by users are received and stored. Write results to `sast/fileupload-recon.md`.
 >
@@ -446,20 +446,29 @@ Only proceed to Phase 2 if Phase 1 found at least one upload site.
 
 ### Phase 2: Check for Extension Bypass Vulnerabilities (Batched)
 
-After Phase 1 completes, read `sast/fileupload-recon.md` and split the upload sites into **batches of up to 3 sites each**. Launch **one subagent per batch in parallel**. Each subagent analyzes only its assigned sites and writes results to its own batch file.
+After Phase 1 completes, read `sast/fileupload-recon.md` and split the upload sites into **batches of up to 3 sites each**. Process each batch **sequentially**. For each batch, analyze only the assigned sites and write results to the batch file.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/fileupload-recon.md` and count the numbered site sections (### 1., ### 2., etc.).
 2. Divide them into batches of up to 3. For example, 8 sites → 3 batches (1-3, 4-6, 7-8).
 3. For each batch, extract the full text of those site sections from the recon file.
-4. Launch all batch subagents **in parallel**, passing each one only its assigned sites.
-5. Each subagent writes to `sast/fileupload-batch-N.md` where N is the 1-based batch number.
-6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project uses Node.js with Multer, include only the "Node.js — Multer (Express)" examples. Include these selected examples in each subagent's instructions where indicated by `[TECH-STACK EXAMPLES]` below.
+4. Process each batch sequentially, working through each one only its assigned sites.
+5. Write results to `sast/fileupload-batch-N.md` where N is the 1-based batch number.
+6. Identify the project's primary language/framework from `sast/architecture.md` and select **only the matching examples** from the "Vulnerable vs. Secure Examples" section above. For example, if the project uses Node.js with Multer, include only the "Node.js — Multer (Express)" examples. Include these selected examples for the current batch where indicated by `[TECH-STACK EXAMPLES]` below.
 
-Give each batch subagent the following instructions (substitute the batch-specific values):
+For each batch, apply the following analysis directly (substitute the batch-specific values):
 
 > **Goal**: For each assigned file upload site below, determine whether an attacker can upload a malicious file (e.g., a PHP web shell, a JSP shell, a Python script) by manipulating the filename, extension, or Content-Type header. Write results to `sast/fileupload-batch-[N].md`.
+>
+> **Step 0 — Cross-reference with route call graph (Node.js / Next.js projects)**:
+> If `sast/nodejs-routes.md` exists, do the following BEFORE any backward tracing:
+> 1. Search the file for each assigned upload handler's file path or function name. Look for ⚠️ [FILE] flags in the call tree.
+> 2. If found with 🔴 user-tainted → confirmed user-controlled file data reaches this handler. Use the call chain to understand what validation (if any) is applied along the path.
+> 3. If NOT found in the call graph → trace the upload handler manually as described below.
+> **Next.js**: File uploads in Next.js typically come from `request.formData()` in `route.ts` handlers or `formData` arguments in `'use server'` Server Actions. Both are ALWAYS user-controlled. Route group folders do NOT appear in URLs.
+>
+> **Minimum trace depth**: When tracing validation logic, follow all validation helper functions at least 5 hops deep. Never assume a validation check is sufficient without reading its implementation.
 >
 > **Your assigned upload sites** (from the recon phase):
 >
@@ -560,7 +569,7 @@ Give each batch subagent the following instructions (substitute the batch-specif
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/fileupload-batch-*.md` file and merge them into a single `sast/fileupload-results.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/fileupload-batch-*.md` file and merge them into a single `sast/fileupload-results.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -592,12 +601,12 @@ After **all** Phase 2 batch subagents complete, read every `sast/fileupload-batc
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes — it depends on the recon output.
 - Phase 3 must run AFTER all Phase 2 batches complete — it depends on all batch outputs.
-- Batch size is **3 upload sites per subagent**. If there are 1-3 sites total, use a single subagent. If there are 10, use 4 subagents (3+3+3+1).
-- Launch all batch subagents **in parallel** — do not run them sequentially.
-- Each batch subagent receives only its assigned sites' text from the recon file, not the entire recon file. This keeps each subagent's context small and focused.
+- Process batches of up to **3 upload sites each** sequentially. If there are 1-3 sites total, treat it as a single batch.
+- Process all batches sequentially — write results to batch files as you complete each one.
+- For each batch, work only from the assigned sites' text from the recon file, not the entire file. This keeps each batch focused.
 - **Phase 1 is purely discovery**: find every place a user-supplied file is received and stored. Do not deeply analyze validation in Phase 1 — just note what is visible. That is Phase 2's job.
 - **Phase 2 is purely bypass analysis**: for each assigned upload site, examine the validation logic and determine whether it can be bypassed through extension manipulation, case variation, content-type spoofing, or path traversal.
 - **Phase 3 is merge only**: combine batch files into `sast/fileupload-results.md` and remove intermediates; do not re-analyze code in Phase 3.

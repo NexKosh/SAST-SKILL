@@ -1,4 +1,4 @@
----
+﻿---
 name: sast-hardcodedsecrets
 description: >-
   Detect hardcoded sensitive data (API keys, access tokens, private keys,
@@ -13,7 +13,7 @@ description: >-
 
 # Hardcoded Secrets in Public Code Detection
 
-You are performing a focused security assessment to find hardcoded sensitive data that is exposed in publicly accessible code. This skill uses a three-phase approach with subagents: **recon** (find all potential secret candidates), **batched verify** (confirm each is a real secret in publicly reachable code, in parallel batches of 3), and **merge** (consolidate batch reports into one file).
+You are performing a focused security assessment to find hardcoded sensitive data that is exposed in publicly accessible code. This skill uses a three-phase approach: **recon** (find all potential secret candidates), **batched verify** (confirm each is a real secret in publicly reachable code, in parallel batches of 3), and **merge** (consolidate batch reports into one file).
 
 **Prerequisites**: `sast/architecture.md` must exist. Run the analysis skill first if it doesn't.
 
@@ -153,11 +153,11 @@ Search for variables/constants with these name patterns and check if the assigne
 
 ## Execution
 
-This skill runs in three phases using subagents. Pass the contents of `sast/architecture.md` to all subagents as context.
+This skill runs entirely in your current context — do NOT spawn subagents. Read `sast/architecture.md` before starting and use it throughout.
 
 ### Phase 1: Recon — Find Secret Candidates
 
-Launch a subagent with the following instructions:
+**Do the following directly** (no subagents — you are the sole agent):
 
 > **Goal**: Find every location in the codebase where a hardcoded secret (API key, access token, private key, password, signing secret, connection string) appears as a string literal. Write results to `sast/hardcodedsecrets-recon.md`.
 >
@@ -236,17 +236,17 @@ Only proceed to Phase 2 if Phase 1 found at least one candidate.
 
 ### Phase 2: Verify — Confirm Real Secrets in Public Code (Batched)
 
-After Phase 1 completes, read `sast/hardcodedsecrets-recon.md` and split the candidates into **batches of up to 3 candidates each**. Launch **one subagent per batch in parallel**. Each subagent verifies only its assigned candidates and writes results to its own batch file.
+After Phase 1 completes, read `sast/hardcodedsecrets-recon.md` and split the candidates into **batches of up to 3 candidates each**. Process each batch **sequentially**. For each batch, verify only the assigned candidates and write results to the batch file.
 
 **Batching procedure** (you, the orchestrator, do this — not a subagent):
 
 1. Read `sast/hardcodedsecrets-recon.md` and count the numbered candidate sections (### 1., ### 2., etc.).
 2. Divide them into batches of up to 3. For example, 8 candidates -> 3 batches (1-3, 4-6, 7-8).
 3. For each batch, extract the full text of those candidate sections from the recon file.
-4. Launch all batch subagents **in parallel**, passing each one only its assigned candidates.
-5. Each subagent writes to `sast/hardcodedsecrets-batch-N.md` where N is the 1-based batch number.
+4. Process each batch sequentially, working through each one only its assigned candidates.
+5. Write results to `sast/hardcodedsecrets-batch-N.md` where N is the 1-based batch number.
 
-Give each batch subagent the following instructions (substitute the batch-specific values):
+For each batch, apply the following analysis directly (substitute the batch-specific values):
 
 > **Goal**: Verify the following hardcoded secret candidates. For each one, determine (1) whether it is a real secret and (2) whether it is in publicly accessible code. Write results to `sast/hardcodedsecrets-batch-[N].md`.
 >
@@ -359,7 +359,7 @@ Give each batch subagent the following instructions (substitute the batch-specif
 
 ### Phase 3: Merge — Consolidate Batch Results
 
-After **all** Phase 2 batch subagents complete, read every `sast/hardcodedsecrets-batch-*.md` file and merge them into a single `sast/hardcodedsecrets-results.md`. You (the orchestrator) do this directly — no subagent needed.
+After completing all batches in Phase 2, read every `sast/hardcodedsecrets-batch-*.md` file and merge them into a single `sast/hardcodedsecrets-results.md`. Do this directly in your current context.
 
 **Merge procedure**:
 
@@ -391,12 +391,12 @@ After **all** Phase 2 batch subagents complete, read every `sast/hardcodedsecret
 
 ## Important Reminders
 
-- Read `sast/architecture.md` and pass its content to all subagents as context.
+- Read `sast/architecture.md` and keep it in context throughout.
 - Phase 2 must run AFTER Phase 1 completes — it depends on the recon output.
 - Phase 3 must run AFTER all Phase 2 batches complete — it depends on all batch outputs.
-- Batch size is **3 candidates per subagent**. If there are 1-3 candidates total, use a single subagent. If there are 10, use 4 subagents (3+3+3+1).
-- Launch all batch subagents **in parallel** — do not run them sequentially.
-- Each batch subagent receives only its assigned candidates' text from the recon file, not the entire recon file. This keeps each subagent's context small and focused.
+- Process batches of up to **3 candidates each** sequentially. If there are 1-3 candidates total, treat it as a single batch.
+- Process all batches sequentially — write results to batch files as you complete each one.
+- For each batch, work only from the assigned candidates' text from the recon file, not the entire file. This keeps each batch focused.
 - **The key distinction is public accessibility**: a hardcoded AWS key in a Django view is bad practice but NOT a finding for this skill (it's server-side). The same key in a React component IS a finding because it ships to the browser.
 - **Trace the import chain when uncertain**: A file at `src/utils/config.ts` might be imported by both server and client code. Check who imports it. If ANY client-side code path imports it, the secrets are exposed.
 - **Mobile apps are always public**: All source code in Android, iOS, React Native, Flutter, and Xamarin apps should be treated as extractable. APKs can be decompiled with `apktool`/`jadx`, IPAs can be inspected, JS bundles in React Native are plaintext.

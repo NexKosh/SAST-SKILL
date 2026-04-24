@@ -396,6 +396,9 @@ Launch a subagent with the following instructions:
 >    - Identify the pattern used: `@login_required`, `auth` middleware, `[Authorize]`, `authenticate_user!`, JWT verification middleware, session checks
 >    - Note which routes or route groups they are applied to
 >    - Note any routes explicitly excluded from auth (e.g., `except: [:index, :show]`)
+>    - **Router group middleware (CRITICAL for Node.js/Express)**: Search every router file for `router.use(fn)` or `router.use(fn1, fn2, ...)` calls that have NO HTTP-path string as their first argument. These apply to ALL routes defined after them in that router. Record these group-level middlewares — a route with no inline auth argument is NOT unprotected if a `router.use(authMiddleware)` appears above it in the same file.
+>    - **Mount-point middleware**: Search for `app.use('/prefix', middlewareFn, router)` patterns — middleware listed between the path and the router object protects every route inside that router.
+>    - **NestJS controller-level guards**: A `@UseGuards(...)` or `@Roles(...)` decorator on the **controller class** applies to every method inside it — check the class definition, not just the method.
 >    - **For Next.js**: read `middleware.ts` / `middleware.js` (project root or `src/`) in full:
 >      - Extract the `matcher` from `export const config = { matcher: [...] }`
 >      - Determine what the middleware function actually enforces (auth check / redirect / analytics only)
@@ -419,7 +422,7 @@ Launch a subagent with the following instructions:
 >    - Returns aggregate or sensitive data: all users, all orders, audit logs, error logs
 >
 > 5. **For each endpoint, note**:
->    - Whether an auth middleware/decorator is present
+>    - Whether an auth middleware/decorator is present (check BOTH inline route args AND group-level `router.use()` calls above the route in the same file)
 >    - Whether a role/permission check is present
 >    - The HTTP method(s) it handles
 >    - Whether it reads, writes, or deletes data
@@ -463,13 +466,14 @@ Launch a subagent with the following instructions:
 > - **Endpoint**: `METHOD /path`
 > - **Operation**: [read / write / delete / admin-action]
 > - **Auth present**: [yes / no]
+> - **Auth source**: [inline route arg / group-level router.use() / mount-point middleware / controller decorator / none]
 > - **Role check present**: [yes / no / partial]
 > - **[Next.js] Route Group**: `(groupName)` or [root] or N/A
 > - **[Next.js] Middleware coverage**: ✅ covered / 🔴 NOT covered / N/A
 > - **[Next.js] Layout auth**: ✅ yes / ⚠️ no / N/A
 > - **Code snippet**:
 >   ```
->   [route registration + handler signature]
+>   [route registration + handler signature, plus any router.use() calls earlier in the same router]
 >   ```
 >
 > [Repeat for each endpoint]
@@ -522,6 +526,9 @@ Give each batch subagent the following instructions (substitute the batch-specif
 >
 > 1. **Authentication check** — is a valid login/session/token required?
 >    - Is there an auth middleware, decorator, or guard on this route or its parent group?
+>    - **For Express/Koa (CRITICAL)**: Do NOT rely only on what's listed in the route call arguments. Open the router file and scan upward from the route definition for `router.use(fn)` calls that have no path argument — these apply to all routes below them in the same file. A route with no inline auth argument may still be fully protected by a group-level `router.use(authenticate)` above it.
+>    - **Also check**: `app.use('/prefix', middlewareFn, router)` — if the router is mounted with a middleware in the `app.use()` call, every route inside is protected.
+>    - **For NestJS**: Check for `@UseGuards(...)` on the controller class itself — this protects every method inside, even if individual methods have no guard decorator.
 >    - Trace the middleware chain — confirm the auth middleware runs BEFORE the handler, not after
 >    - Check if the route is accidentally mounted outside an auth-protected group
 >    - **For Next.js**: check BOTH layers:

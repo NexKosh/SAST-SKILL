@@ -94,12 +94,14 @@ Launch a subagent with the following instructions:
 > - For each hit, record: HTTP method, path string (first argument), and handler function reference (last argument — may be inline arrow function or named function reference)
 > - If the handler is a named reference (e.g., `router.get('/users', getUser)`), note the function name and the file where it's defined
 > - Trace router mounting: if `app.use('/api/v1', userRouter)` mounts a router, all routes on `userRouter` have the `/api/v1` prefix — compute full paths
+> - **Router group middleware (CRITICAL)**: For each router file, search for `router.use(fn)` or `router.use(fn1, fn2)` calls that have NO path string as first argument (or a wildcard `'*'`). These apply to ALL routes defined after them in the same router. Read these calls and record which middleware functions they register. When recording a route in that router, list these group-level middlewares under "Group middleware" — do NOT mark the route as "none detected" just because the inline route call has no middleware argument.
+> - Also check: `app.use('/prefix', middlewareFn, router)` — when a router is mounted with middleware arguments inline, those middlewares protect every route inside that router.
 >
 > **NestJS**:
 > - Search for `@Controller(` to find all controller classes and their base paths
 > - Within each controller, search for `@Get(`, `@Post(`, `@Put(`, `@Delete(`, `@Patch(`, `@All(` — note sub-path and the method name immediately below the decorator
 > - Compute full path = controller base path + method sub-path
-> - Note any `@UseGuards(`, `@Roles(`, `@Public(` decorators on the method — these affect authentication
+> - Note any `@UseGuards(`, `@Roles(`, `@Public(` decorators on **both the controller class AND the individual method** — a guard on the class applies to every method inside it
 >
 > **Fastify**:
 > - Search for `fastify.get(`, `fastify.post(`, `fastify.route({`, `fastify.register(`
@@ -118,6 +120,7 @@ Launch a subagent with the following instructions:
 >
 > **For each route, also record**:
 > - Whether an auth middleware or guard is listed in the route definition (e.g., `router.get('/path', authMiddleware, handler)` — note `authMiddleware`)
+> - Whether group-level middleware applies (from `router.use(fn)` calls earlier in the same router file, or from `app.use('/path', middleware, router)` at mount point)
 > - The file and approximate line number of the route registration
 > - The file and approximate line number of the handler function definition (if it can be located)
 >
@@ -135,8 +138,9 @@ Launch a subagent with the following instructions:
 > ### 1. [METHOD] [full-path]
 > - **File**: `path/to/routes.ts` (line X — route registration)
 > - **Handler**: `functionName()` in `path/to/handler.ts` (line Y)
-> - **Auth middleware**: [list middleware names, or "none detected"]
-> - **Guard / decorator**: [e.g., `@UseGuards(JwtAuthGuard)`, or "none"]
+> - **Auth middleware (inline)**: [middleware listed directly in the route call, or "none"]
+> - **Auth middleware (group-level)**: [middleware applied via router.use() to the whole router or mount point, or "none"]
+> - **Guard / decorator**: [e.g., `@UseGuards(JwtAuthGuard)` on method or controller class, or "none"]
 > - **Handler snippet**:
 >   ```
 >   [the first 5-10 lines of the handler function body]
@@ -187,9 +191,17 @@ Give each batch subagent the following instructions (substitute batch-specific v
 >
 > For each assigned route:
 >
-> 1. **Start at the handler function**. Read its full source code.
+> 1. **Identify the entry point function** by framework type — then read its full source code:
 >
-> 2. **List every function call** made in the handler body. For each call:
+>    - **Express / Koa / Hapi / Restify**: the handler function (last argument of the route registration call, or named reference)
+>    - **NestJS**: the controller method decorated with `@Get / @Post / ...`
+>    - **Fastify**: the handler function in the route options object
+>    - **Next.js `route.ts` (API Route Handler)**: the named export matching the HTTP method — e.g., `export async function GET(request)`, `export async function POST(request)`. Read the file and start tracing from the matching export.
+>    - **Next.js `page.tsx` (Server Component page)**: the `default export` function. This IS a valid attack entry point — `searchParams` and `params` are user-controlled. Read the file and start tracing from the default export.
+>    - **Next.js `layout.tsx` (Server Component layout)**: the `default export` function. Layouts can also perform data fetching with user-influenced values. Trace from the default export.
+>    - **Next.js Server Actions**: any function inside a `'use server'` file, or a function marked `'use server'` at its top. The `formData` argument carries user input. Trace from the function body.
+>
+> 2. **List every function call** made in the entry point body. For each call:
 >    - Is it a project-defined function? (i.e., imported from a project file, or defined in the same file — NOT from `node_modules/`)
 >    - Is it a security-sensitive built-in or library call (see the flag list below)?
 >
@@ -202,6 +214,19 @@ Give each batch subagent the following instructions (substitute batch-specific v
 >    - The function has no further calls — mark as `[leaf]`
 >
 > 5. **Detect and handle cycles**: If a function appears twice on the same call path (recursive call), mark it as `[recursive — not re-expanded]` to avoid infinite loops.
+>
+> ---
+>
+> **User-controlled taint sources by framework**:
+>
+> When annotating tainted values, look for these user-controlled sources:
+>
+> - **Express / Koa / Hapi / Restify**: `req.body`, `req.query`, `req.params`, `req.headers`, `req.cookies`, `ctx.request.body`, `ctx.query`, `ctx.params`
+> - **NestJS**: `@Body()`, `@Query()`, `@Param()`, `@Headers()`, `@Req()` decorated parameters
+> - **Fastify**: `request.body`, `request.query`, `request.params`, `request.headers`
+> - **Next.js `route.ts`**: `request.json()`, `request.formData()`, `request.text()`, URL search params via `new URL(request.url).searchParams`
+> - **Next.js `page.tsx` / `layout.tsx`**: the `searchParams` prop (URL query string — ALWAYS user-controlled), the `params` prop (dynamic route segments — user-controlled), `cookies()` / `headers()` from `next/headers`
+> - **Next.js Server Actions**: `formData.get(key)`, `formData.getAll(key)`, any parameter passed from the client call site
 >
 > ---
 >
@@ -218,8 +243,11 @@ Give each batch subagent the following instructions (substitute batch-specific v
 > - `⚠️ [SERIAL]` — `yaml.load()`, `serialize.unserialize()`, unsafe deserialization
 > - `⚠️ [AUTH]` — `jwt.verify/decode()`, `bcrypt.compare()`, session read
 > - `⚠️ [RESPONSE]` — `res.send/json/render/redirect()` — note when the argument contains data that came from the request (potential reflected output)
+> - `⚠️ [XSS]` — `dangerouslySetInnerHTML={{ __html: value }}` in any React component — flag if `value` is derived from user input
+> - `⚠️ [REDIRECT]` — `redirect(url)` from `next/navigation` — flag if `url` is derived from user-controlled input (open redirect)
+> - `⚠️ [ACTION-CSRF]` — Server Action that mutates state without verifying the caller's session before the mutation
 >
-> For each flagged operation, also note whether you can see a variable that appears to carry user input (from `req.body`, `req.query`, `req.params`, `req.headers`, etc.) flowing into it. If yes, mark it `🔴 user-tainted`; if it appears server-side only, mark `🟢 server-side only`; if uncertain, mark `🟡 unknown`.
+> For each flagged operation, also note whether you can see a variable that appears to carry user input (from the taint sources listed above for the relevant framework) flowing into it. If yes, mark it `🔴 user-tainted`; if it appears server-side only, mark `🟢 server-side only`; if uncertain, mark `🟡 unknown`.
 >
 > ---
 >

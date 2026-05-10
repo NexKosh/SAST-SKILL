@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/token"
 	"go/types"
+	"os"
 	"strings"
 
 	"golang.org/x/tools/go/callgraph/rta"
@@ -12,6 +14,14 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
+
+// Edge represents a single call relationship
+type Edge struct {
+	Caller    string `json:"caller"`
+	Callee    string `json:"callee"`
+	CalleePkg string `json:"callee_pkg"`
+	Boundary  bool   `json:"boundary"` // true = 離開 project-owned code
+}
 
 var modulePrefixes []string
 
@@ -25,68 +35,53 @@ func isProjectOwned(pkgPath string) bool {
 	return false
 }
 
-var securitySinks = map[string]string{
-	"database/sql":  "SQL",
-	"os/exec":       "RCE",
-	"net/http":      "HTTP_CLIENT",
-	"os":            "FILE_IO",
-	"io/ioutil":     "FILE_IO",
-	"html/template": "XSS",
-	"text/template": "SSTI",
-	"crypto":        "CRYPTO",
-	"encoding/xml":  "XML",
-	"archive/zip":   "ARCHIVE",
-	"path/filepath": "PATH",
+// boundaryPkgs 是工具會在邊界停下來標記的外部 package
+// 純事實，不含任何判斷或分類標籤
+var boundaryPkgs = []string{
+	"database/sql",
+	"os/exec",
+	"net/http",
+	"os",
+	"io/ioutil",
+	"html/template",
+	"text/template",
+	"crypto",
+	"encoding/xml",
+	"archive/zip",
+	"path/filepath",
 }
 
-func parseSinkFlag(raw string) {
+func parseBoundaryFlag(raw string) {
 	for _, item := range strings.Split(raw, ",") {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
+		if item = strings.TrimSpace(item); item != "" {
+			boundaryPkgs = append(boundaryPkgs, item)
 		}
-		parts := strings.SplitN(item, "=", 2)
-		if len(parts) != 2 {
-			fmt.Printf("warn: invalid sink format %q, expected pkg=LABEL\n", item)
-			continue
-		}
-		securitySinks[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 	}
 }
 
-func classifySink(pkgPath string) (string, bool) {
-	for prefix, label := range securitySinks {
+func isBoundaryPkg(pkgPath string) bool {
+	for _, prefix := range boundaryPkgs {
 		if strings.HasPrefix(pkgPath, prefix) {
-			return label, true
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
-// Web handler signatures 各 framework
+// Web handler signatures
 var handlerSignatures = []struct {
-	framework  string
 	paramCount int
 	typeHints  []string
 }{
-	// net/http
-	{"net/http", 2, []string{"http.ResponseWriter", "http.Request"}},
-	// gin
-	{"gin", 1, []string{"gin.Context"}},
-	// echo
-	{"echo", 1, []string{"echo.Context"}},
-	// fiber
-	{"fiber", 1, []string{"fiber.Ctx"}},
-	// chi (net/http 相容)
-	{"chi", 2, []string{"http.ResponseWriter", "http.Request"}},
-	// fasthttp
-	{"fasthttp", 1, []string{"fasthttp.RequestCtx"}},
+	{2, []string{"http.ResponseWriter", "http.Request"}},
+	{1, []string{"gin.Context"}},
+	{1, []string{"echo.Context"}},
+	{1, []string{"fiber.Ctx"}},
+	{1, []string{"fasthttp.RequestCtx"}},
 }
 
-func detectHandlerFramework(fn *ssa.Function) (framework string, ok bool) {
-	sig := fn.Signature
-	params := sig.Params()
-
+func isWebHandler(fn *ssa.Function) bool {
+	params := fn.Signature.Params()
 	for _, h := range handlerSignatures {
 		if params.Len() != h.paramCount {
 			continue
@@ -102,15 +97,14 @@ func detectHandlerFramework(fn *ssa.Function) (framework string, ok bool) {
 			}
 		}
 		if matched == h.paramCount {
-			return h.framework, true
+			return true
 		}
 	}
-	return "", false
+	return false
 }
 
 func collectWebRoots(ssaPkgs []*ssa.Package) []*ssa.Function {
 	var roots []*ssa.Function
-	detected := map[string]int{}
 
 	for _, pkg := range ssaPkgs {
 		if pkg == nil || pkg.Pkg == nil {
@@ -120,35 +114,33 @@ func collectWebRoots(ssaPkgs []*ssa.Package) []*ssa.Function {
 			continue
 		}
 		for _, member := range pkg.Members {
-			fn, ok := member.(*ssa.Function)
-			if !ok {
-				continue
-			}
-			if framework, ok := detectHandlerFramework(fn); ok {
-				roots = append(roots, fn)
-				detected[framework]++
+			switch m := member.(type) {
+			case *ssa.Function:
+				if isWebHandler(m) {
+					roots = append(roots, m)
+				}
+			case *ssa.Type:
+				mset := pkg.Prog.MethodSets.MethodSet(types.NewPointer(m.Type()))
+				for i := 0; i < mset.Len(); i++ {
+					fn := pkg.Prog.MethodValue(mset.At(i))
+					if fn != nil && isWebHandler(fn) {
+						roots = append(roots, fn)
+					}
+				}
 			}
 		}
-	}
-
-	if len(detected) > 0 {
-		fmt.Println("=== Detected web frameworks ===")
-		for fw, count := range detected {
-			fmt.Printf("  %s: %d handlers\n", fw, count)
-		}
-		fmt.Println()
 	}
 
 	return roots
 }
 
-func collectMainRoots(ssaPkgs []*ssa.Package, entryName string) []*ssa.Function {
+func collectNamedRoots(ssaPkgs []*ssa.Package, name string) []*ssa.Function {
 	var roots []*ssa.Function
 	for _, pkg := range ssaPkgs {
 		if pkg == nil {
 			continue
 		}
-		if fn := pkg.Func(entryName); fn != nil {
+		if fn := pkg.Func(name); fn != nil {
 			roots = append(roots, fn)
 		}
 	}
@@ -156,26 +148,28 @@ func collectMainRoots(ssaPkgs []*ssa.Package, entryName string) []*ssa.Function 
 }
 
 func main() {
-	moduleFlag := flag.String("module", "", "module prefix，逗號分隔")
-	pkgFlag    := flag.String("pkg", "./...", "要分析的 package pattern")
-	entryFlag  := flag.String("entry", "main", "entry point：main / web / 任意 function 名稱")
-	sinkFlag   := flag.String("sink", "", "額外的 sink，格式：pkg前綴=標籤，逗號分隔\n例如：github.com/redis/go-redis=REDIS,gorm.io/gorm=ORM")
+	moduleFlag    := flag.String("module", "", "module prefix，逗號分隔")
+	pkgFlag       := flag.String("pkg", "./...", "要分析的 package pattern")
+	entryFlag     := flag.String("entry", "main", "entry point：main / web / 任意 function 名稱")
+	boundaryFlag  := flag.String("boundary", "", "額外的 boundary package，逗號分隔\n例如：gorm.io/gorm,github.com/redis/go-redis")
+	formatFlag    := flag.String("format", "text", "輸出格式：text / json")
+	listEntryFlag := flag.Bool("list-entry", false, "只列出所有 entry point，不跑 call graph")
 	flag.Parse()
 
-	if *sinkFlag != "" {
-		parseSinkFlag(*sinkFlag)
-	}
-
 	if *moduleFlag == "" {
-		fmt.Println("error: -module is required")
+		fmt.Fprintln(os.Stderr, "error: -module is required")
 		flag.Usage()
-		return
+		os.Exit(1)
 	}
 
 	for _, m := range strings.Split(*moduleFlag, ",") {
 		if m = strings.TrimSpace(m); m != "" {
 			modulePrefixes = append(modulePrefixes, m)
 		}
+	}
+
+	if *boundaryFlag != "" {
+		parseBoundaryFlag(*boundaryFlag)
 	}
 
 	fset := token.NewFileSet()
@@ -192,7 +186,8 @@ func main() {
 
 	pkgs, err := packages.Load(cfg, *pkgFlag)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "error loading packages: %v\n", err)
+		os.Exit(1)
 	}
 
 	prog, ssaPkgs := ssautil.AllPackages(pkgs, ssa.InstantiateGenerics)
@@ -202,18 +197,38 @@ func main() {
 	if *entryFlag == "web" {
 		roots = collectWebRoots(ssaPkgs)
 	} else {
-		roots = collectMainRoots(ssaPkgs, *entryFlag)
+		roots = collectNamedRoots(ssaPkgs, *entryFlag)
 	}
 
 	if len(roots) == 0 {
-		fmt.Printf("error: no entry points found (entry=%q)\n", *entryFlag)
+		fmt.Fprintf(os.Stderr, "error: no entry points found (entry=%q)\n", *entryFlag)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "entry points: %d\n", len(roots))
+
+	if *listEntryFlag {
+		switch *formatFlag {
+		case "json":
+			var names []string
+			for _, fn := range roots {
+				names = append(names, fn.RelString(nil))
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			enc.Encode(names)
+		default:
+			for _, fn := range roots {
+				fmt.Println(fn.RelString(nil))
+			}
+		}
 		return
 	}
 
-	fmt.Printf("=== Entry points: %d ===\n\n", len(roots))
-
 	result := rta.Analyze(roots, true)
 	result.CallGraph.DeleteSyntheticNodes()
+
+	var edges []Edge
 
 	for fn, node := range result.CallGraph.Nodes {
 		if fn == nil {
@@ -239,17 +254,34 @@ func main() {
 			}
 
 			if isProjectOwned(calleePkgPath) {
-				fmt.Printf("[INTERNAL] %s → %s\n",
-					fn.RelString(nil),
-					callee.RelString(nil),
-				)
-			} else if label, ok := classifySink(calleePkgPath); ok {
-				fmt.Printf("[SINK:%s] %s → (%s).%s\n",
-					label,
-					fn.RelString(nil),
-					calleePkgPath,
-					callee.Name(),
-				)
+				edges = append(edges, Edge{
+					Caller:    fn.RelString(nil),
+					Callee:    callee.RelString(nil),
+					CalleePkg: calleePkgPath,
+					Boundary:  false,
+				})
+			} else if isBoundaryPkg(calleePkgPath) {
+				edges = append(edges, Edge{
+					Caller:    fn.RelString(nil),
+					Callee:    callee.Name(),
+					CalleePkg: calleePkgPath,
+					Boundary:  true,
+				})
+			}
+		}
+	}
+
+	switch *formatFlag {
+	case "json":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(edges)
+	default:
+		for _, e := range edges {
+			if e.Boundary {
+				fmt.Printf("[BOUNDARY] %s → (%s).%s\n", e.Caller, e.CalleePkg, e.Callee)
+			} else {
+				fmt.Printf("[CALL] %s → %s\n", e.Caller, e.Callee)
 			}
 		}
 	}
